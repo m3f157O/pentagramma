@@ -1,0 +1,1141 @@
+# Copyright (C) 2020 ditekshen
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+try:
+    import re2 as re
+except ImportError:
+    import re
+
+from lib.cuckoo.common.abstracts import Signature
+
+
+class NetworkCnCHTTPSGeneric(Signature):
+    name = "network_cnc_https_generic"
+    description = "Establishes an encrypted HTTPS connection"
+    severity = 2
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.match = False
+        self.httpverbs = [
+            "GET",
+            "POST",
+            "ET /",
+            "OST /",
+        ]
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for verb in self.httpverbs:
+                if buff.startswith(verb):
+                    self.match = True
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        return self.match
+
+
+class NetworkCnCHTTPSSocialMedia(Signature):
+    name = "network_cnc_https_socialmedia"
+    description = "Establishes an encrypted HTTPS connection to a social media API"
+    severity = 3
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket", "InternetOpenUrlA", "InternetOpenUrlW"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.domains = [
+            "api.twitter.com",
+            "cdn.discordapp.com",
+            "api.telegram.org",
+            "api.instagram.com",
+            "graph.facebook.com",
+            "wa.me",
+            "gist.github.com",
+            "raw.githubusercontent.com",
+            "telete.in",
+            "api.whatsapp.com",
+            "api.vkontakte.ru",
+            "api.vk.com",
+            "files.slack.com",
+        ]
+        self.urls = []
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for domain in self.domains:
+                host_header = "Host: " + domain
+                if host_header in buff:
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+        elif call["api"] in ("InternetOpenUrlA", "InternetOpenUrlW"):
+            url = self.get_argument(call, "URL")
+            for domain in self.domains:
+                if url.startswith("https://" + domain):
+                    self.urls.append(url)
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        for url in list(set(self.urls)):
+            self.data.append({"url": url})
+
+        if self.data:
+            return True
+        return False
+
+
+class NetworkCnCHTTPSPasteSite(Signature):
+    name = "network_cnc_https_pastesite"
+    description = "Establishes an encrypted HTTPS connection to a paste site"
+    severity = 3
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket", "InternetOpenUrlA", "InternetOpenUrlW"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.domains = [
+            "pastebin.com",
+            "paste.ee",
+            "pastecode.xyz",
+            "rentry.co",
+            "paste.nrecom.net",
+            "hastebin.com",
+            "privatebin.info",
+            "penyacom.org",
+            "controlc.com",
+            "tiny-paste.com",
+            "paste.teknik.io",
+            "privnote.com",
+            "hushnote.herokuapp.com",
+            "justpaste.it",
+            "stikked.ch",
+            "dpaste.com",
+            "pastebin.pl",
+        ]
+        self.urls = []
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for domain in self.domains:
+                host_header = "Host: " + domain
+                if host_header in buff:
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+        elif call["api"] in ("InternetOpenUrlA", "InternetOpenUrlW"):
+            url = self.get_argument(call, "URL")
+            for domain in self.domains:
+                if url.startswith("https://" + domain):
+                    self.urls.append(url)
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        for url in list(set(self.urls)):
+            self.data.append({"url": url})
+
+        if self.data:
+            return True
+        return False
+
+
+class NetworkCnCHTTPSURLShortenerSite(Signature):
+    name = "network_cnc_https_urlshortener"
+    description = "Establishes an encrypted HTTPS connection to a URL shortener site"
+    severity = 3
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket", "InternetOpenUrlA", "InternetOpenUrlW"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.domains = [
+            "1url.com",
+            "2ly.link",
+            "2no.co",
+            "2uuu.me",
+            "3c5.com",
+            "4x.si",
+            "42url.com",
+            "7x.qa",
+            "9lick.me",
+            "abre.ai",
+            "adcraft.co",
+            "adcrun.ch",
+            "adf.ly",
+            "adflav.com",
+            "aiy.ooo",
+            "aka.gr",
+            "amzn.to",
+            "artist.link",
+            "b2n.ir",
+            "bc.vc",
+            "bee4.biz",
+            "belea.link",
+            "bit.do",
+            "bit.ly",
+            "bitly.com",
+            "bitly.com.vn",
+            "bitly.lc",
+            "bitly.ws",
+            "bom.so",
+            "buff.ly",
+            "buzurl.com",
+            "bx.ms",
+            "cektkp.com",
+            "ci.ci",
+            "clck.ru",
+            "cml.lol",
+            "coki.me",
+            "cur.lv",
+            "cut.by",
+            "cutt.ly",
+            "cutt.us",
+            "cuty.io",
+            "d.to",
+            "db.tt",
+            "dft.ba",
+            "dik.si",
+            "dub.co",
+            "dub.sh",
+            "dwz.mk",
+            "e.vg",
+            "encr.pw",
+            "encurtador.dev",
+            "etd.bz",
+            "filoops.info",
+            "fun.ly",
+            "fzy.co",
+            "gg-l.xyz",
+            "gog.li",
+            "golinks.co",
+            "goo.by",
+            "goo.gd",
+            "goo.gl",
+            "goo.su",
+            "han.gl",
+            "hit.my",
+            "hyp.ae",
+            "hyperurl.co",
+            "ic9.in",
+            "id.tl",
+            "idm.in",
+            "iii.im",
+            "iiil.io",
+            "ilang.in",
+            "insprl.com",
+            "iplogger.com",
+            "iplogger.org",
+            "is.gd",
+            "ito.mx",
+            "iurl.vip",
+            "ity.im",
+            "j.mp",
+            "jii.li",
+            "komin.fo",
+            "kortlink.dk",
+            "kutti.co",
+            "lc.cx",
+            "link.zip.net",
+            "linksshortcut.com",
+            "linkto.im",
+            "litby.us",
+            "ln.run",
+            "lnk.co",
+            "lnk.direct",
+            "lnk.ink",
+            "lnk.pw",
+            "lnkd.in",
+            "lnkfi.re",
+            "long.af",
+            "longurl.in",
+            "maxiurl.com",
+            "mcaf.ee",
+            "me2.do",
+            "merky.de",
+            "mjt.lu",
+            "mtr.bio",
+            "my5353.com",
+            "mylinks.ai",
+            "n9.cl",
+            "nanourly.in",
+            "neya.io",
+            "nov.io",
+            "odesli.co",
+            "onx.la",
+            "ouvaton.link",
+            "ow.ly",
+            "p6l.org",
+            "picz.us",
+            "po.st",
+            "postly.link",
+            "prettylinkpro.com",
+            "q.gs",
+            "qr.ae",
+            "qr.net",
+            "qrco.de",
+            "rb.gy",
+            "rebrand.ly",
+            "rebrandly.com",
+            "rebrandly.info",
+            "relink.is",
+            "ricardo.news",
+            "s.devh.in",
+            "s.ee",
+            "s.id",
+            "s.rlp.de",
+            "s3r.io",
+            "s59.site",
+            "scrnch.me",
+            "shly.link",
+            "shorten.ee",
+            "shorten.is",
+            "shorten.tv",
+            "shortquik.com",
+            "shorturl.ae",
+            "shorturl.at",
+            "shrtcnl.com",
+            "sht.ac",
+            "sk.gy",
+            "sl8.in",
+            "smarturl.it",
+            "smurl.fr",
+            "sn.rs",
+            "snip.ly",
+            "song.link",
+            "spoo.me",
+            "sprl.in",
+            "srink.co",
+            "su.pr",
+            "surl.li",
+            "t.co",
+            "t.ly",
+            "temporary-url.com",
+            "tg.pe",
+            "tiny.cc",
+            "tinyarrows.com",
+            "tinyurl.com",
+            "tinyurl.mobi",
+            "tota2.com",
+            "tr.im",
+            "trimz.me",
+            "tt.vg",
+            "tweez.me",
+            "twitthis.com",
+            "twixar.com",
+            "twixar.me",
+            "tyny.to",
+            "u.bb",
+            "u.to",
+            "urled.cc",
+            "urled.pro",
+            "urless.com",
+            "urlr.me",
+            "urlshort.dev",
+            "urltin.com",
+            "urlz.fr",
+            "ux9.de",
+            "v.gd",
+            "v.ht",
+            "vtaurl.com",
+            "vzturl.com",
+            "webz.cc",
+            "wp.me",
+            "x.co",
+            "xlinkz.info",
+            "xtu.me",
+            "xy2.eu",
+            "ykm.de",
+            "yirra.net",
+            "yourls.org",
+            "youtu.be",
+            "yu2.it",
+            "yu3.io",
+            "zpag.es",
+            "zpr.io",
+            "zurl.to",
+            "zws.im",
+            "zzb.bz",
+        ]
+        self.urls = []
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for domain in self.domains:
+                host_header = "Host: " + domain
+                if host_header in buff:
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+        elif call["api"] in ("InternetOpenUrlA", "InternetOpenUrlW"):
+            url = self.get_argument(call, "URL")
+            for domain in self.domains:
+                if url.startswith("https://" + domain):
+                    self.urls.append(url)
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        for url in list(set(self.urls)):
+            self.data.append({"url": url})
+
+        if self.data:
+            return True
+        return False
+
+
+class NetworkCnCHTTPSTempStorageSite(Signature):
+    name = "network_cnc_https_tempstorage"
+    description = "Establishes an encrypted HTTPS connection to a temporary or anonymous storage site"
+    severity = 3
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket", "InternetOpenUrlA", "InternetOpenUrlW"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.domains = [
+            "send-anywhere.com",
+            "sendgb.com",
+            "volafile.org",
+            "uploadfiles.io",
+            "sendpace.com",
+            "filedropper.com",
+            "myairbridge.co",
+            "u.teknik.io",
+            "p.teknik.io",
+            "upload.sexy",
+            "digitalassets.ams3.digitaloceanspaces.com",
+            "api.sendspace.com",
+            "www.fileden.com",
+            "a.pomf.cat",
+            "dropmb.com",
+            "transfer.sh",
+            "1fichier.com",
+            "gofile.io",
+        ]
+        self.urls = []
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for domain in self.domains:
+                host_header = "Host: " + domain
+                if host_header in buff:
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+        elif call["api"] in ("InternetOpenUrlA", "InternetOpenUrlW"):
+            url = self.get_argument(call, "URL")
+            for domain in self.domains:
+                if url.startswith("https://" + domain):
+                    self.urls.append(url)
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        for url in list(set(self.urls)):
+            self.data.append({"url": url})
+
+        if self.data:
+            return True
+        return False
+
+
+class NetworkCnCHTTPSUserAgent(Signature):
+    name = "network_cnc_https_useragent"
+    description = "Establishes an encrypted HTTPS connection containing a suspicious or fake User Agent"
+    severity = 3
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.match = False
+        self.useragents = [
+            "AutoIt",
+            "Mozilla/7",
+            "AutoHotKey",
+            "Moz5",
+            "(iPhone;",
+            "(iPad;",
+            "(Android;",
+            "like Mac OS X",
+            "(Macintosh;",
+            "(X11; Linux",
+            "DiscordBot",
+            "NSISDL",
+            "InnoDownloadPlugin",
+            "IEMobile",
+            "Windows Phone OS",
+            "(BlackBerry;",
+            "MSIE 5.5",
+            "by NZXER",
+            "SymbianOS",
+        ]
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for ua in self.useragents:
+                if ua in buff:
+                    self.match = True
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        return self.match
+
+
+class NetworkCnCHTTPSTempURLDNS(Signature):
+    name = "network_cnc_https_temp_urldns"
+    description = "Establishes encrypted HTTPS connection to temporary URL or DNS service"
+    severity = 3
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket", "InternetOpenUrlA", "InternetOpenUrlW"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.domains = [
+            ".requestbin.net",
+        ]
+        self.urls = []
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for domain in self.domains:
+                if domain in buff:
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+        elif call["api"] in ("InternetOpenUrlA", "InternetOpenUrlW"):
+            url = self.get_argument(call, "URL")
+            for domain in self.domains:
+                if re.match("https://.*\\" + domain + ".*", url):
+                    self.urls.append(url)
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        for url in list(set(self.urls)):
+            self.data.append({"url": url})
+
+        if self.data:
+            return True
+        return False
+
+
+class NetworkCnCHTTPSInteractsh(Signature):
+    name = "network_cnc_https_interactsh"
+    description = "Establishes encrypted HTTPS connection to Interactsh"
+    severity = 3
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket", "InternetOpenUrlA", "InternetOpenUrlW"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.domains = [
+            ".interact.sh",
+        ]
+        self.urls = []
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for domain in self.domains:
+                if domain in buff:
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+        elif call["api"] in ("InternetOpenUrlA", "InternetOpenUrlW"):
+            url = self.get_argument(call, "URL")
+            for domain in self.domains:
+                if re.match("https://.*\\" + domain + ".*", url):
+                    self.urls.append(url)
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        for url in list(set(self.urls)):
+            self.data.append({"url": url})
+
+        if self.data:
+            return True
+        return False
+
+
+class NetworkCnCHTTPSPayload(Signature):
+    name = "network_cnc_https_payload"
+    description = "Downloads executable over encrypted HTTPS connection"
+    severity = 3
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslDecryptPacket"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.match = False
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff and "MZ" in buff and "This program cannot be run in" in buff:
+            self.match = True
+            if self.pid:
+                self.mark_call()
+
+    def on_complete(self):
+        return self.match
+
+
+class NetworkCnCHTTPSFreeWebHosting(Signature):
+    name = "network_cnc_https_free_webhosting"
+    description = "Establishes encrypted HTTPS connection to free web hosting service"
+    severity = 3
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket", "InternetOpenUrlA", "InternetOpenUrlW"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.domains = [
+            ".000webhostapp.com",
+            ".repl.co",
+            ".glitch.me",
+            ".ck.page",
+        ]
+        self.urls = []
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for domain in self.domains:
+                if domain in buff:
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+        elif call["api"] in ("InternetOpenUrlA", "InternetOpenUrlW"):
+            url = self.get_argument(call, "URL")
+            for domain in self.domains:
+                if re.match("https://.*\\" + domain + ".*", url):
+                    self.urls.append(url)
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        for url in list(set(self.urls)):
+            self.data.append({"url": url})
+
+        if self.data:
+            return True
+        return False
+
+
+class NetworkCnCHTTPSTelegram(Signature):
+    name = "network_cnc_https_telegram"
+    description = "Detected exfiltration of data via Telegram"
+    severity = 3
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.found_snake = False
+        self.found_matiex = False
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff and "api.telegram.org" in buff:
+            if "Snake" in buff and "Keylogger" in buff:
+                self.found_snake = True
+                self.data.append({"http_request": buff})
+                if self.pid:
+                    self.mark_call()
+            elif "Matiex" and "Keylogger" in buff:
+                self.found_matiex = True
+                self.data.append({"http_request": buff})
+                if self.pid:
+                    self.mark_call()
+
+    def on_complete(self):
+        if self.found_snake:
+            self.description = "{0} {1}".format("Snake Keylogger", self.description)
+            self.families = ["Snake"]
+            return True
+        elif self.found_matiex:
+            self.description = "{0} {1}".format("Matiex Keylogger", self.description)
+            self.families = ["Matiex"]
+            return True
+
+        return False
+
+
+class NetworkCnCSMTPSGeneric(Signature):
+    name = "network_cnc_smtps_generic"
+    description = "Encrypted SMTPS communication was detected"
+    severity = 2
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.match = False
+        self.smtpheaders = [
+            "AUTH",
+            "MAIL",
+            "RCPT",
+            "UTH login",
+            "AIL FROM",
+            "CPT TO",
+        ]
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for header in self.smtpheaders:
+                if buff.startswith(header):
+                    self.match = True
+                    self.data.append({"smtp_header": buff})
+                    if self.pid:
+                        self.mark_call()
+
+            if "From: " in buff or "To: " in buff or "Subject: " in buff:
+                self.match = True
+                self.data.append({"smtp_header": buff})
+                if self.pid:
+                    self.mark_call()
+
+    def on_complete(self):
+        return self.match
+
+
+class NetworkCnCSMTPSExfil(Signature):
+    name = "network_cnc_smtps_exfil"
+    description = "Keylogger detected exfiltrating data via encrypted SMTPS connection"
+    severity = 3
+    categories = ["network", "encryption", "infostealer", "rat", "keylogger"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1020", "T1041"]  # MITRE v6,7,8
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.match = False
+        self.found_orion = False
+        self.found_phoenix = False
+        self.found_hawkeye = False
+        self.found_agentteslat1 = False
+        self.found_agentteslat2 = False
+        self.found_aspire = False
+        self.found_m00nd3v = False
+        self.found_masslogger = False
+        self.found_firebirdrat = False
+        self.found_snake = False
+        self.found_a310logger = False
+        self.found_matiex = False
+        self.found_neptune = False
+        self.found_kraken = False
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            if "From: " in buff or "To: " in buff:
+                self.data.append({"smtp_header": buff})
+                if self.pid:
+                    self.mark_call()
+            if "Subject: " in buff:
+                if (
+                    "SGF3a0V5ZSBLZXlsb" in buff
+                    or "SGF3a0V5ZSBSZ" in buff
+                    or "HawkEye Keylogger" in buff
+                    or "HawkEye Reborn" in buff
+                ):
+                    self.found_hawkeye = True
+                    if self.pid:
+                        self.mark_call()
+                if " Recovered " in buff:
+                    self.found_agentteslat1 = True
+                    if self.pid:
+                        self.mark_call()
+                if "PSWD |" in buff or "Logs |" in buff or "Screenshot |" in buff:
+                    self.found_phoenix = True
+                    if self.pid:
+                        self.mark_call()
+                if "Orion Logger" in buff or "Orion" in buff:
+                    self.found_orion = True
+                    if self.pid:
+                        self.mark_call()
+                if (
+                    "Subject: P_" in buff
+                    or "Subject: S_" in buff
+                    or "Subject: C_" in buff
+                    or "Subject: PW_" in buff
+                    or "Subject: CO_" in buff
+                    or "Subject: SC_" in buff
+                    or "Subject: KL_" in buff
+                ):
+                    self.found_agentteslat2 = True
+                    if self.pid:
+                        self.mark_call()
+                if "AspireLogger" in buff or "Aspire" in buff:
+                    self.found_aspire = True
+                    if self.pid:
+                        self.mark_call()
+                if (
+                    "U3RlYWxlciBMb2dz" in buff
+                    or "Execution Alert!" in buff
+                    or "Password Monitoring" in buff
+                    or "KeyStroke Monitoring" in buff
+                    or "Screen Monitoring" in buff
+                    or "WebCam Monitoring" in buff
+                    or "Clipboard Monitoring" in buff
+                ):
+                    self.found_m00nd3v = True
+                    if self.pid:
+                        self.mark_call()
+                if "MassLogger |" in buff:
+                    self.found_masslogger = True
+                    if self.pid:
+                        self.mark_call()
+                if ": PASSWORDS" in buff:
+                    self.found_firebirdrat = True
+                    if self.pid:
+                        self.mark_call()
+                if "Snake Keylogger" in buff or "| Snake" in buff:
+                    self.found_snake = True
+                    if self.pid:
+                        self.mark_call()
+                if "Passwords:::" in buff or "PW::" in buff or "FILES::" in buff or "SC::" in buff:
+                    self.found_a310logger = True
+                    if self.pid:
+                        self.mark_call()
+                if "Matiex Keylogger" in buff:
+                    self.found_matiex = True
+                    if self.pid:
+                        self.mark_call()
+                if "Neptune" in buff:
+                    self.found_neptune = True
+                    if self.pid:
+                        self.mark_call()
+                if " Recovered From: " in buff:
+                    self.found_kraken = True
+                    if self.pid:
+                        self.mark_call()
+                if "Screen Capture" in buff or "Keylog" in buff:
+                    self.match = True
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        if self.found_orion:
+            self.description = "{0} {1}".format("Orion", self.description)
+            self.families = ["OrionKeylogger"]
+            return True
+        elif self.found_hawkeye:
+            self.description = "{0} {1}".format("HawkEye", self.description)
+            self.families = ["HawkEye"]
+            return True
+        elif self.found_phoenix:
+            self.description = "{0} {1}".format("Phoenix", self.description)
+            self.families = ["Phoenix"]
+            return True
+        elif self.found_agentteslat1:
+            self.description = "{0} {1}".format("AgentTeslaV1", self.description)
+            self.families = ["AgentTesla"]
+            return True
+        elif self.found_agentteslat2:
+            self.description = "{0} {1}".format("AgentTeslaV3", self.description)
+            self.families = ["AgentTesla"]
+            return True
+        elif self.found_aspire:
+            self.description = "{0} {1}".format("AspireLogger", self.description)
+            self.families = ["AspireLogger"]
+            return True
+        elif self.found_m00nd3v:
+            self.description = "{0} {1}".format("M00nD3v", self.description)
+            self.families = ["M00nD3v"]
+            return True
+        elif self.found_masslogger:
+            self.description = "{0} {1}".format("MassLogger", self.description)
+            self.families = ["MassLogger"]
+            return True
+        elif self.found_firebirdrat:
+            self.description = "{0} {1}".format("Firebird/Hive", self.description)
+            self.families = ["FirebirdRAT"]
+            return True
+        elif self.found_snake:
+            self.description = "{0} {1}".format("Snake", self.description)
+            self.families = ["Snake"]
+            return True
+        elif self.found_a310logger:
+            self.description = "{0} {1}".format("A310Logger", self.description)
+            self.families = ["A310Logger"]
+            return True
+        elif self.found_matiex:
+            self.description = "{0} {1}".format("Matiex", self.description)
+            self.families = ["Matiex"]
+            return True
+        elif self.found_neptune:
+            self.description = "{0} {1}".format("Neptune", self.description)
+            self.families = ["Neptune"]
+            return True
+        elif self.found_kraken:
+            self.description = "{0} {1}".format("Kraken", self.description)
+            self.families = ["KrakenStealer"]
+            return True
+        elif self.match:
+            self.description = "{0} {1}".format("Generic", self.description)
+            return True
+
+        return False
+
+
+class NetworkCnCHTTPSArchive(Signature):
+    name = "network_cnc_https_archive"
+    description = "Establishes an encrypted HTTPS connection to an internet archiving website"
+    severity = 3
+    categories = ["network", "encryption"]
+    authors = ["bartblaze"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket", "InternetOpenUrlA", "InternetOpenUrlW"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.domains = [
+            "archive.org",
+            "archive.is",
+            "archive.ph",
+            "archive.today",
+        ]
+        self.urls = []
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for domain in self.domains:
+                host_header = "Host: " + domain
+                if host_header in buff:
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+        elif call["api"] in ("InternetOpenUrlA", "InternetOpenUrlW"):
+            url = self.get_argument(call, "URL")
+            for domain in self.domains:
+                if url.startswith("https://" + domain):
+                    self.urls.append(url)
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        for url in list(set(self.urls)):
+            self.data.append({"url": url})
+
+        if self.data:
+            return True
+        return False
+
+
+class NetworkCnCHTTPSOpenSource(Signature):
+    name = "network_cnc_https_opensource"
+    description = "Establishes an encrypted HTTPS connection to an open-source code-hosting platform"
+    severity = 1
+    categories = ["network", "encryption"]
+    authors = ["@CybercentreCanada"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket", "InternetOpenUrlA", "InternetOpenUrlW"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.domains = [
+            "gist.github.com",
+            "raw.githubusercontent.com",
+        ]
+        self.urls = []
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for domain in self.domains:
+                host_header = "Host: " + domain
+                if host_header in buff:
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+        elif call["api"] in ("InternetOpenUrlA", "InternetOpenUrlW"):
+            url = self.get_argument(call, "URL")
+            for domain in self.domains:
+                if url.startswith("https://" + domain):
+                    self.urls.append(url)
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        for url in list(set(self.urls)):
+            self.data.append({"url": url})
+
+        if self.data:
+            return True
+        return False
+
+
+class NetworkCnCHTTPSServiceInterface(Signature):
+    name = "network_cnc_https_serviceinterface"
+    description = "Establishes an encrypted HTTPS connection to free service interface platform"
+    severity = 1
+    categories = ["network", "encryption"]
+    authors = ["ditekshen"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1032"]  # MITRE v6
+    ttps += ["T1573"]  # MITRE v7,8
+
+    filter_apinames = set(["SslEncryptPacket", "InternetOpenUrlA", "InternetOpenUrlW"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.domains = [
+            "mockbin.org",
+            "run.mocky.io",
+            "webhook.site",
+            "devtunnels.ms",
+        ]
+        self.urls = []
+
+    def on_call(self, call, process):
+        buff = self.get_argument(call, "Buffer")
+        if buff:
+            for domain in self.domains:
+                host_header = "Host: " + domain
+                if host_header in buff:
+                    self.data.append({"http_request": buff})
+                    if self.pid:
+                        self.mark_call()
+
+        elif call["api"] in ("InternetOpenUrlA", "InternetOpenUrlW"):
+            url = self.get_argument(call, "URL")
+            for domain in self.domains:
+                if url.startswith("https://" + domain):
+                    self.urls.append(url)
+                    if self.pid:
+                        self.mark_call()
+
+    def on_complete(self):
+        for url in list(set(self.urls)):
+            self.data.append({"url": url})
+
+        if self.data:
+            return True
+        return False

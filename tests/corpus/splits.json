@@ -1,0 +1,25 @@
+{
+  "assignments": {
+    "amsi_detection.ps1": "train",
+    "benign_control.bat": "train",
+    "c2_named_pipe.ps1": "train",
+    "credential_access_lsass.ps1": "train",
+    "defender_tampering.ps1": "train",
+    "gw_admin_inventory.ps1": "test",
+    "gw_archive_roundtrip.ps1": "train",
+    "gw_cim_sysinfo.ps1": "train",
+    "gw_file_hash_manifest.ps1": "train",
+    "gw_netconfig.bat": "train",
+    "gw_registry_read.ps1": "train",
+    "gw_scheduled_tasks.ps1": "test",
+    "gw_signed_tools.bat": "train",
+    "lolbin_certutil_download.bat": "train",
+    "lolbin_cradle.bat": "train",
+    "mass_file_modification.ps1": "train",
+    "persistence_runkey.ps1": "train",
+    "process_injection.exe": "train",
+    "wmi_persistence.ps1": "train"
+  },
+  "seed": "sandbox-corpus-v1",
+  "test_ratio": 0.2
+}

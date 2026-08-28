@@ -1,0 +1,47 @@
+# --- Python ---
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- Runtime data (regenerated/collected per run; huge) ---
+logs/
+reports/
+out/
+backups/
+
+# --- Local config (contains guest VM credentials) ---
+config/config.yaml
+
+# --- Temp one-off analysis scripts ---
+scripts/_*.py
+scripts/_*.ps1
+scripts/_*.bat
+
+# --- Root-level error/debug logs ---
+*.log
+
+# --- Samples: hash-sharded corpus binaries + goodware/incoming staging ---
+# Keep only source trees (InjectionHarness) in git; payloads stay local.
+samples/*/
+!samples/InjectionHarness/
+
+# --- .NET build output (InjectionHarness) ---
+**/bin/
+**/obj/
+**/publish/
+
+# --- C/C++ build output (monitor / guardian) ---
+guardian/out/
+monitor_src/build/
+**/x64/Debug/
+**/x64/Release/
+**/CMakeFiles/
+CMakeCache.txt
+*.obj
+
+# --- OS/editor noise ---
+Thumbs.db
+*.user
+.vs/
+.claude/

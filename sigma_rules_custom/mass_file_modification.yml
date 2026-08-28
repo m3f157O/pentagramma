@@ -1,0 +1,44 @@
+title: Sandbox file create/delete event (correlation base)
+name: sandbox_file_change_event
+status: experimental
+description: >
+    Base rule for the mass-file-modification correlation: a single Sysmon file
+    create / stream-hash / delete event (EventID 11/15/23/26). Never alerts on
+    its own -- it exists only to be counted by the correlation below.
+author: sandbox
+logsource:
+    product: windows
+detection:
+    selection:
+        EventID:
+            - 11
+            - 15
+            - 23
+            - 26
+    condition: selection
+level: informational
+---
+title: Mass File Modification
+id: c0f1a2b3-3333-4a00-9c03-5a0dbea50b03
+status: experimental
+description: >
+    A single process created/deleted >= 20 files within 5 seconds --
+    ransomware-style bulk file activity. Migrated from
+    orchestrator/heuristics.py's _detect_mass_file_modification into a
+    declarative Sigma event_count correlation rule (phase 3 standardization),
+    so the temporal threshold is browsable and tunable like any rule.
+author: sandbox
+date: 2026/07/03
+tags:
+    - attack.impact
+    - attack.t1486
+correlation:
+    type: event_count
+    rules:
+        - sandbox_file_change_event
+    group-by:
+        - ProcessId
+    timespan: 5s
+    condition:
+        gte: 20
+level: high

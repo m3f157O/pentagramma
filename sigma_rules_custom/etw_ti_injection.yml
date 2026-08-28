@@ -1,0 +1,30 @@
+title: ETW-TI Cross-Process Memory / Thread Operation (Injection)
+id: c0f1a2b3-4444-4a00-9c04-5a0dbea50b04
+status: experimental
+description: >
+    An ETW Threat-Intelligence event describing an operation whose target
+    process differs from the calling process -- cross-process VM alloc/write/
+    protect, remote thread creation, APC queue or SetThreadContext. This is
+    the core primitive of process injection / hollowing / manual mapping that
+    user-mode-hook-based tooling (Sysmon) can miss. Routes on the etw_ti
+    telemetry source (agent/windows/etw_ti_collector.py) and uses the
+    field-reference modifier to compare TargetProcessId against
+    CallingProcessId -- newly supported by orchestrator/sigma_engine.py.
+author: sandbox
+date: 2026/07/03
+tags:
+    - attack.defense_evasion
+    - attack.privilege_escalation
+    - attack.t1055
+logsource:
+    product: windows
+    service: etw_ti
+detection:
+    selection:
+        TargetProcessId|exists: true
+    same_process:
+        TargetProcessId|fieldref: CallingProcessId
+    condition: selection and not same_process
+falsepositives:
+    - Legitimate debuggers, AV/EDR, and some installers perform cross-process operations
+level: high

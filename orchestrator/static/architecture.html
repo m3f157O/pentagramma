@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Architecture &middot; PENTAGRAMMA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="css/style.css?v=21" />
+  <style>
+    .arch-flow { display: flex; flex-direction: column; gap: 0; margin-top: 16px; }
+    .arch-layer { border: 1px solid var(--border, #2d333b); border-radius: 10px; padding: 14px 16px; background: var(--panel, #161b22); }
+    .arch-layer h3 { margin: 0 0 4px 0; font-size: 15px; }
+    .arch-layer .layer-sub { margin-bottom: 10px; }
+    .arch-boxes { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+    .arch-box { border: 1px solid var(--border, #2d333b); border-radius: 8px; padding: 8px 10px; background: rgba(255,255,255,0.02); font-size: 12.5px; }
+    .arch-box b { display: block; font-size: 12.5px; margin-bottom: 2px; }
+    .arch-box .muted { font-size: 11.5px; }
+    .arch-arrow { text-align: center; color: var(--muted, #8b949e); font-size: 18px; line-height: 1.4; user-select: none; }
+    .arch-arrow span { font-size: 11px; margin-left: 6px; }
+    .badge-planned { background: #3b2f00; color: #e6b800; border: 1px solid #7a6200; border-radius: 10px; padding: 1px 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; }
+    .badge-live { background: #06281a; color: #3fb950; border: 1px solid #1a5335; border-radius: 10px; padding: 1px 8px; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; }
+    .tier-table td:first-child { white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PENTAGRAMMA</div>
+    <nav>
+      <a href="index.html">Dashboard</a>
+      <a href="live.html">Live Trace</a>
+      <a href="traces.html">Traces</a>
+      <a href="reports.html">Reports</a>
+      <a href="rules.html">Rules</a>
+      <a href="harness.html">Injection Harness</a>
+      <a href="architecture.html" class="active">Architecture</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Architecture</h1>
+    <p class="muted small">How a sample becomes a verdict: telemetry in the guest &rarr; collection &rarr; detection engines &rarr; scoring &rarr; report. Planned components are marked.</p>
+
+    <div class="arch-flow">
+
+      <div class="arch-layer">
+        <h3>1 &middot; Guest VM <span class="muted small">(&ldquo;bande nere&rdquo;, reverted to SANDBOX_READY per run)</span></h3>
+        <div class="layer-sub muted small">Everything here is potentially visible to the sample &mdash; the guardian driver (planned) exists to defend and audit this layer.</div>
+        <div class="arch-boxes">
+          <div class="arch-box"><b>MinHook monitor <span class="badge-live">live</span></b><span class="muted">37 Nt/Win32 hooks injected before the sample's first instruction; follows child processes (incl. WoW64). Emits argument-level API events over a named pipe.</span></div>
+          <div class="arch-box"><b>Sysmon <span class="badge-live">live</span></b><span class="muted">Kernel-backed process/file/registry/network/DNS/injection events (EIDs 1&ndash;26). Survives direct syscalls and user-mode unhooking.</span></div>
+          <div class="arch-box"><b>AMSI + PowerShell logging <span class="badge-live">live</span></b><span class="muted">Deobfuscated script content (script blocks, scan results) &mdash; the main window into script-based stages.</span></div>
+          <div class="arch-box"><b>Event logs <span class="badge-live">live</span></b><span class="muted">Security / System / Defender channels, incl. AV detection names.</span></div>
+          <div class="arch-box"><b>Environment dressing <span class="badge-live">live</span></b><span class="muted">Golden image carries a believable used profile (documents, Edge history/bookmarks, RunMRU, recent shortcuts) so anti-sandbox checks see a real user. Uptime stays unfakeable (accepted).</span></div>
+          <div class="arch-box"><b>SandboxGuard driver <span class="badge-planned">planned</span></b><span class="muted">Protects agent/Sysmon processes, keys and logs (documented Ob/Cm/minifilter callbacks); verifies hook integrity from kernel (unblindable); flags module remaps.</span></div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">&uarr;<span>named pipe + merged telemetry.jsonl + artifacts, pulled via PSDirect / Copy-VMFile</span></div>
+
+      <div class="arch-layer">
+        <h3>2 &middot; Collection</h3>
+        <div class="layer-sub muted small">One normalized event shape per source, merged and time-sorted into a single stream; artifacts travel alongside.</div>
+        <div class="arch-boxes">
+          <div class="arch-box"><b>telemetry.jsonl</b><span class="muted">sysmon &middot; apitrace &middot; amsi &middot; powershell &middot; security/system/defender logs &middot; guardian (planned)</span></div>
+          <div class="arch-box"><b>Artifacts</b><span class="muted">pktmon PCAP &middot; screenshots &middot; interval process dumps &middot; dropped files (hashed, YARA-rescanned)</span></div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">&uarr;<span>executor: restore snapshot &rarr; boot &rarr; deploy agent &rarr; launch sample &rarr; collect</span></div>
+
+      <div class="arch-layer">
+        <h3>3 &middot; Detection engines <span class="muted small">(single assembly path &mdash; live runs and offline replay share it)</span></h3>
+        <div class="layer-sub muted small">Each engine emits alerts in one common shape; families are listed in evaluation order.</div>
+        <div class="arch-boxes">
+          <div class="arch-box"><b>Heuristics</b><span class="muted">LOLBin patterns, burst/sequence detectors, Defender verdicts, dump/dropped-file YARA.</span></div>
+          <div class="arch-box"><b>Behavioral signatures</b><span class="muted">14 custom signatures over the API trace: injection chains, exec protection, APC, tokens, timing, tamper&hellip;</span></div>
+          <div class="arch-box"><b>Blind-spot correlation <span class="badge-live">live</span></b><span class="muted">Apitrace&harr;Sysmon counterpart map: a Sysmon event with no hook counterpart = unhooking / direct syscalls. Silence detection for quieted traces.</span></div>
+          <div class="arch-box"><b>Sigma</b><span class="muted">2,082 vendored rules + customs over Sysmon events (min level medium).</span></div>
+          <div class="arch-box"><b>CAPE community</b><span class="muted">758 signature classes replayed over the API trace. Enrichment-only today (scoring off pending corpus validation).</span></div>
+          <div class="arch-box"><b>YARA + capa (static)</b><span class="muted">Pre-execution matching on the sample; capa capability extraction feeds scoring.</span></div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">&uarr;<span>alerts &rarr; additive verdict score + MITRE coverage + IOC summary</span></div>
+
+      <div class="arch-layer">
+        <h3>4 &middot; Scoring &amp; output</h3>
+        <div class="arch-boxes">
+          <div class="arch-box"><b>Verdict</b><span class="muted">Additive score over scoring families with top-reasons attribution (benign / suspicious / malicious).</span></div>
+          <div class="arch-box"><b>Report JSON</b><span class="muted">Events, alerts (sample vs environment scope), process tree, MITRE map, artifacts, verdict.</span></div>
+          <div class="arch-box"><b>Dashboard + REST + MCP</b><span class="muted">This UI, the /api endpoints behind it, and the MCP server agents use to drive the sandbox.</span></div>
+        </div>
+      </div>
+
+      <div class="arch-arrow">&uarr;<span>every detection change is re-validated offline before it is trusted</span></div>
+
+      <div class="arch-layer">
+        <h3>5 &middot; Validation &amp; hardening loop</h3>
+        <div class="arch-boxes">
+          <div class="arch-box"><b>Offline replay</b><span class="muted">scripts/replay_detection.py rebuilds a report's verdict from stored inputs with current code &mdash; drift isolation without re-detonation.</span></div>
+          <div class="arch-box"><b>Canaries</b><span class="muted">Benign BAT/PS1 pair must stay suspicious/37 with zero behavioral alerts; InjectionHarness must stay malicious/90.</span></div>
+          <div class="arch-box"><b>Corpus metrics</b><span class="muted">Labeled corpus with train/test splits drives precision/recall/FPR gates (detection_metrics.py).</span></div>
+          <div class="arch-box"><b>Coverage map <span class="badge-live">live</span></b><span class="muted">Generated apitrace&harr;Sysmon counterpart table (docs/coverage-table.md) &mdash; the design basis for blind-spot detection.</span></div>
+        </div>
+      </div>
+
+    </div>
+
+    <details class="section" style="margin-top:20px" open>
+      <summary>Evasion resistance: the three tiers</summary>
+      <div class="section-body">
+        <p class="small muted">A sandbox does not need to <em>survive</em> tampering &mdash; every run is disposable. It needs to <em>see</em> tampering, because &ldquo;the sample unhooked ntdll at T+8s&rdquo; is itself a top-tier signal. Investment is ordered accordingly:</p>
+        <table class="tier-table">
+          <thead><tr><th>Tier</th><th>Goal</th><th>How</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr><td><b>1 &middot; See</b></td><td>Detect tampering</td><td>Apitrace&harr;Sysmon counterpart misses, silence detection, tamper flags on guarded-module writes</td><td><span class="badge badge-live">live</span></td></tr>
+            <tr><td><b>2 &middot; Survive</b></td><td>Keep observing despite tampering</td><td>SandboxGuard driver: protects agent/Sysmon, config and logs; kernel-side hook-integrity verification (cannot be blinded from user mode)</td><td><span class="badge badge-planned">planned</span></td></tr>
+            <tr><td><b>3 &middot; Prevent</b></td><td>Be invisible to the sample</td><td>Hypervisor-level monitoring &mdash; deliberately out of scope (staying on Hyper-V, no public VMI API)</td><td class="muted">rejected</td></tr>
+          </tbody>
+        </table>
+        <p class="small muted" style="margin-top:8px">Known, accepted blind spots: direct/indirect syscalls (only ETW-TI or a hypervisor sees them &mdash; ETW-TI is gated behind PPL signing; Sysmon still captures their kernel-level <em>effects</em>), and TLS-encrypted C2 content (capture is metadata-only).</p>
+      </div>
+    </details>
+
+    <details class="section">
+      <summary>Source map (where each layer lives in the repo)</summary>
+      <div class="section-body">
+        <table>
+          <thead><tr><th>Layer</th><th>Code</th></tr></thead>
+          <tbody>
+            <tr><td>Monitor / hooks</td><td class="mono small">agent\windows\monitor_src\ (build: scripts\build_monitor.ps1)</td></tr>
+            <tr><td>Guest collectors</td><td class="mono small">agent\windows\telemetry_collector.py, apitrace_collector.py, sysmon_parser.py</td></tr>
+            <tr><td>Execution / VM</td><td class="mono small">orchestrator\executor.py, orchestrator\hyperv.py, scripts\hyperv-vm.ps1</td></tr>
+            <tr><td>Detection</td><td class="mono small">orchestrator\{heuristics,behavioral_signatures,sigma_engine,cape_engine,detectors,verdict}.py</td></tr>
+            <tr><td>Reporting</td><td class="mono small">orchestrator\reporting.py, report_view.py, mitre_mapping.py</td></tr>
+            <tr><td>Validation</td><td class="mono small">scripts\{replay_detection,detection_metrics,compare_reports}.py, tests\</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+  </main>
+</body>
+</html>

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Live Trace &middot; PENTAGRAMMA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="css/style.css?v=21" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PENTAGRAMMA</div>
+    <nav>
+      <a href="index.html">Dashboard</a>
+      <a href="live.html" class="active">Live Trace</a>
+      <a href="traces.html">Traces</a>
+      <a href="reports.html">Reports</a>
+      <a href="rules.html">Rules</a>
+      <a href="harness.html">Injection Harness</a>
+      <a href="architecture.html">Architecture</a>
+    </nav>
+    <div style="margin-left:auto">
+      <span id="live-badge" class="badge neutral">idle</span>
+    </div>
+  </header>
+
+  <main>
+    <h1>Live API trace &mdash; local host</h1>
+    <p class="small muted">
+      Launches a program on <b>this host</b> under the MinHook behavioral monitor
+      (the sandbox's hooking engine, no VM): the target starts suspended, the monitor
+      DLL is injected before its first instruction, and every hooked call streams here
+      live (1&thinsp;s refresh). Children are followed automatically.
+      <b>Note:</b> the orchestrator runs elevated &mdash; the traced program does too.
+    </p>
+
+    <div class="card">
+      <div class="card-title">Launch target</div>
+      <form id="trace-form" class="controls" style="margin-top:8px">
+        <input type="text" id="trace-target" placeholder="C:\Windows\System32\notepad.exe" style="min-width:380px" />
+        <input type="text" id="trace-args" placeholder="arguments (optional)" style="min-width:220px" />
+        <button type="submit" id="btn-start">Start trace</button>
+        <button type="button" id="btn-stop" class="secondary" disabled>Stop</button>
+      </form>
+      <div id="trace-status" class="small muted">No session.</div>
+    </div>
+
+    <details class="aux-details" style="margin-top:12px">
+      <summary>Active hookset (<span id="live-hooks-count">0</span> hooks)</summary>
+      <div class="aux-body" id="live-hooks-inventory"><div class="muted small">Loading&hellip;</div></div>
+    </details>
+
+    <div class="controls" style="margin-top:16px">
+      <input type="text" id="trace-filter" placeholder="filter (substring)…" style="min-width:240px" />
+      <label class="small"><input type="checkbox" id="trace-pause" /> pause stream</label>
+      <label class="small"><input type="checkbox" id="trace-autoscroll" /> auto-scroll</label>
+      <button id="btn-clear-view" class="secondary">clear view</button>
+      <span id="trace-count" class="small muted"></span>
+    </div>
+
+    <table>
+      <thead><tr><th>Time</th><th>API</th><th>Category</th><th>PID</th><th>TID</th><th>Arguments</th></tr></thead>
+      <tbody id="trace-body">
+        <tr><td colspan="6" class="empty-state">Start a trace to stream hooked calls here.</td></tr>
+      </tbody>
+    </table>
+  </main>
+
+  <script src="js/api.js?v=10"></script>
+  <script src="js/poll.js?v=5"></script>
+  <script src="js/live.js?v=2"></script>
+</body>
+</html>

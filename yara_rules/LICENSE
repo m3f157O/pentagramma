@@ -1,0 +1,7 @@
+This directory contains YARA rules vendored from an external
+source (e.g. YARA-Forge, https://github.com/YARAHQ/yara-forge).
+
+These rules are NOT this project's own work and retain their original authors'
+licenses and attribution. YARA-Forge aggregates rules under a range of licenses
+(see its LICENSE / the per-rule `license` metadata). See .source_label for what
+was vendored here.

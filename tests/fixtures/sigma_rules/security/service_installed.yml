@@ -1,0 +1,11 @@
+title: Test Security EventID 4697
+id: 44444444-4444-4444-4444-444444444444
+status: test
+logsource:
+    product: windows
+    service: security
+detection:
+    selection:
+        EventID: 4697
+    condition: selection
+level: high

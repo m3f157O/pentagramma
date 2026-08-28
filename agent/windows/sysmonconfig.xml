@@ -1,0 +1,188 @@
+<Sysmon schemaversion="4.91">
+  <HashAlgorithms>sha256,md5</HashAlgorithms>
+  <ArchiveDirectory>SandboxArchive</ArchiveDirectory>
+
+  <EventFiltering>
+    <!-- Process creation -->
+    <RuleGroup name="ProcessCreate" groupRelation="or">
+      <ProcessCreate onmatch="include">
+        <Image condition="contains">\</Image>
+      </ProcessCreate>
+    </RuleGroup>
+
+    <!-- Process termination -->
+    <RuleGroup name="ProcessTerminate" groupRelation="or">
+      <ProcessTerminate onmatch="include">
+        <Image condition="contains">\</Image>
+      </ProcessTerminate>
+    </RuleGroup>
+
+    <!-- File timestomping (a process explicitly rewrites a file's creation
+         time; classic anti-forensic indicator removal, T1070.006) -->
+    <RuleGroup name="FileCreateTime" groupRelation="or">
+      <FileCreateTime onmatch="include">
+        <Image condition="contains">\</Image>
+      </FileCreateTime>
+    </RuleGroup>
+
+    <!-- Network connections (TCP/UDP) -->
+    <RuleGroup name="NetworkConnect" groupRelation="or">
+      <NetworkConnect onmatch="include">
+        <Image condition="contains">\</Image>
+      </NetworkConnect>
+    </RuleGroup>
+
+    <!-- DNS queries -->
+    <RuleGroup name="DnsQuery" groupRelation="or">
+      <DnsQuery onmatch="include">
+        <QueryName condition="contains">.</QueryName>
+      </DnsQuery>
+    </RuleGroup>
+
+    <!-- DLL loads -->
+    <RuleGroup name="ImageLoad" groupRelation="or">
+      <ImageLoad onmatch="include">
+        <Image condition="contains">\</Image>
+      </ImageLoad>
+    </RuleGroup>
+
+    <!-- Exclude the sandbox's own tooling from ImageLoad noise. Sysmon
+         allows one include + one exclude group per event type; exclude
+         always wins over include, so this only ever removes our own
+         processes' self-noise; it can never suppress an attacker
+         loading something from an unexpected path. -->
+    <RuleGroup name="ImageLoad" groupRelation="or">
+      <ImageLoad onmatch="exclude">
+        <Image condition="end with">\Sysmon64.exe</Image>
+        <Image condition="end with">\wevtutil.exe</Image>
+      </ImageLoad>
+    </RuleGroup>
+
+    <!-- Driver loads -->
+    <RuleGroup name="DriverLoad" groupRelation="or">
+      <DriverLoad onmatch="include">
+        <ImageLoaded condition="contains">\</ImageLoaded>
+      </DriverLoad>
+    </RuleGroup>
+
+    <RuleGroup name="DriverLoad" groupRelation="or">
+      <DriverLoad onmatch="exclude">
+        <ImageLoaded condition="end with">\Sysmon64.exe</ImageLoaded>
+      </DriverLoad>
+    </RuleGroup>
+
+    <!-- Remote thread creation -->
+    <RuleGroup name="CreateRemoteThread" groupRelation="or">
+      <CreateRemoteThread onmatch="include">
+        <SourceImage condition="contains">\</SourceImage>
+      </CreateRemoteThread>
+    </RuleGroup>
+
+    <!-- Process access (injection). GrantedAccess masks:
+         0x1010 = PROCESS_QUERY_LIMITED_INFORMATION|VM_READ (Mimikatz default LSASS mask)
+         0x1038 = PROCESS_VM_OPERATION|VM_READ|VM_WRITE|QUERY_LIMITED_INFORMATION (read+write, no full access)
+         0x1410 = PROCESS_QUERY_INFORMATION|QUERY_LIMITED_INFORMATION|VM_READ (ProcDump/Task Manager dump-file mask)
+         0x1F0FFF/0x1F3FFF/0x1FFFFF = PROCESS_ALL_ACCESS variants -->
+    <RuleGroup name="ProcessAccess" groupRelation="or">
+      <ProcessAccess onmatch="include">
+        <GrantedAccess condition="contains any">0x1010;0x1038;0x1410;0x1F0FFF;0x1F3FFF;0x1FFFFF</GrantedAccess>
+      </ProcessAccess>
+    </RuleGroup>
+
+    <RuleGroup name="ProcessAccess" groupRelation="or">
+      <ProcessAccess onmatch="exclude">
+        <SourceImage condition="end with">\Sysmon64.exe</SourceImage>
+        <SourceImage condition="end with">\wevtutil.exe</SourceImage>
+      </ProcessAccess>
+    </RuleGroup>
+
+    <!-- Raw disk access -->
+    <RuleGroup name="RawAccessRead" groupRelation="or">
+      <RawAccessRead onmatch="include">
+        <Image condition="contains">\</Image>
+      </RawAccessRead>
+    </RuleGroup>
+
+    <!-- File create -->
+    <RuleGroup name="FileCreate" groupRelation="or">
+      <FileCreate onmatch="include">
+        <Image condition="contains">\</Image>
+      </FileCreate>
+    </RuleGroup>
+
+    <!-- Alternate data stream creation (ADS hiding, mark-of-the-web bypass) -->
+    <RuleGroup name="FileCreateStreamHash" groupRelation="or">
+      <FileCreateStreamHash onmatch="include">
+        <Image condition="contains">\</Image>
+      </FileCreateStreamHash>
+    </RuleGroup>
+
+    <!-- File delete, WITH content archival to C:\SandboxArchive (see
+         ArchiveDirectory above). Complements the no-archive
+         FileDeleteDetected below; expect roughly double-counting between
+         the two for the same deletes, that's two independent monitors, not
+         a bug. -->
+    <RuleGroup name="FileDelete" groupRelation="or">
+      <FileDelete onmatch="include">
+        <Image condition="contains">\</Image>
+      </FileDelete>
+    </RuleGroup>
+
+    <!-- File delete (logged, no archive) -->
+    <RuleGroup name="FileDeleteDetected" groupRelation="or">
+      <FileDeleteDetected onmatch="include">
+        <Image condition="contains">\</Image>
+      </FileDeleteDetected>
+    </RuleGroup>
+
+    <!-- Clipboard access (clipper-malware / credential-theft signal) -->
+    <RuleGroup name="ClipboardChange" groupRelation="or">
+      <ClipboardChange onmatch="include">
+        <Image condition="contains">\</Image>
+      </ClipboardChange>
+    </RuleGroup>
+
+    <!-- Registry activity: EID 12 (create/delete), 13 (value set), 14
+         (rename). CORRECTED: Sysmon exposes exactly one filter tag,
+         RegistryEvent, covering all three sub-events (differentiated
+         internally by the EventType data field, e.g. CreateKey/SetValue/
+         RenameKey); RegistryCreateDelete/RegistryValueSet/
+         RegistryKeyValueRename (the previous tag names here) do not exist
+         in Sysmon's schema, so this rule group was silently matching
+         nothing and these EIDs were never captured. Verified against
+         Microsoft's Sysmon docs and TrustedSec's SysmonCommunityGuide. -->
+    <RuleGroup name="RegistryEvent" groupRelation="or">
+      <RegistryEvent onmatch="include">
+        <Image condition="contains">\</Image>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!-- Named pipes: EID 17 (create), 18 (connect). CORRECTED: one shared
+         tag, PipeEvent; PipeCreated/PipeConnected are not real Sysmon
+         config elements, same bug as RegistryEvent above. -->
+    <RuleGroup name="PipeEvent" groupRelation="or">
+      <PipeEvent onmatch="include">
+        <Image condition="contains">\</Image>
+      </PipeEvent>
+    </RuleGroup>
+
+    <!-- WMI persistence: EID 19 (filter), 20 (consumer), 21 (consumer-to-
+         filter binding). CORRECTED: one shared tag, WmiEvent;
+         WmiEventFilter/WmiEventConsumer/WmiEventConsumerToFilter are not
+         real Sysmon config elements, same bug as above. No Image field
+         exists on these events, so match everything (same empty-body
+         pattern as ProcessTampering below). -->
+    <RuleGroup name="WmiEvent" groupRelation="or">
+      <WmiEvent onmatch="include">
+      </WmiEvent>
+    </RuleGroup>
+
+    <!-- Process tampering (hollowing, herpaderping, ghosting).
+         The actual Type value for hollowing is "Image is replaced", so we
+         enable all ProcessTampering events with an empty exclude rule. -->
+    <RuleGroup name="ProcessTampering" groupRelation="or">
+      <ProcessTampering onmatch="exclude">
+      </ProcessTampering>
+    </RuleGroup>
+  </EventFiltering>
+</Sysmon>

@@ -1,0 +1,464 @@
+{
+  "generated_by": "scripts/build_coverage_table.py",
+  "generated_at": "2026-08-17T16:13:28.009480+00:00",
+  "hooks": [
+    {
+      "api": "CreateFileW",
+      "hook_module": "kernel32.dll",
+      "category": "file",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        11
+      ],
+      "join_artifact": "arg0 path \u2194 TargetFilename (weak, prefix ok)",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "CreateProcessW",
+      "hook_module": "kernel32.dll",
+      "category": "process",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        1
+      ],
+      "join_artifact": "child_pid \u2194 ProcessId",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtCreateFile",
+      "hook_module": "ntdll.dll",
+      "category": "file",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        11
+      ],
+      "join_artifact": "arg0 path \u2194 TargetFilename (weak, prefix ok)",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtAllocateVirtualMemory",
+      "hook_module": "ntdll.dll",
+      "category": "memory",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        10
+      ],
+      "join_artifact": "cross-process only; target_pid \u2194 TargetProcessId",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtProtectVirtualMemory",
+      "hook_module": "ntdll.dll",
+      "category": "memory",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        10
+      ],
+      "join_artifact": "cross-process only; target_pid \u2194 TargetProcessId",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtWriteVirtualMemory",
+      "hook_module": "ntdll.dll",
+      "category": "memory",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        10
+      ],
+      "join_artifact": "cross-process only; target_pid \u2194 TargetProcessId",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtMapViewOfSection",
+      "hook_module": "ntdll.dll",
+      "category": "memory",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtCreateThreadEx",
+      "hook_module": "ntdll.dll",
+      "category": "injection",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        8
+      ],
+      "join_artifact": "cross-process only; target_pid \u2194 TargetProcessId",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtResumeThread",
+      "hook_module": "ntdll.dll",
+      "category": "injection",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        8
+      ],
+      "join_artifact": "cross-process only; target_pid \u2194 TargetProcessId",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtSetValueKey",
+      "hook_module": "ntdll.dll",
+      "category": "registry",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        13
+      ],
+      "join_artifact": "arg0 value name \u2194 TargetObject",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtCreateUserProcess",
+      "hook_module": "ntdll.dll",
+      "category": "process",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        1
+      ],
+      "join_artifact": "child_pid \u2194 ProcessId",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "LdrLoadDll",
+      "hook_module": "ntdll.dll",
+      "category": "loader",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        7
+      ],
+      "join_artifact": "arg0 path \u2194 ImageLoaded",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtDelayExecution",
+      "hook_module": "ntdll.dll",
+      "category": "timing",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "GetTickCount64",
+      "hook_module": "kernel32.dll",
+      "category": "timing",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtQuerySystemTime",
+      "hook_module": "ntdll.dll",
+      "category": "timing",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "BCryptEncrypt",
+      "hook_module": "bcrypt.dll",
+      "category": "crypto",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "BCryptDecrypt",
+      "hook_module": "bcrypt.dll",
+      "category": "crypto",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "BCryptHashData",
+      "hook_module": "bcrypt.dll",
+      "category": "crypto",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtQueueApcThread",
+      "hook_module": "ntdll.dll",
+      "category": "injection",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtSetContextThread",
+      "hook_module": "ntdll.dll",
+      "category": "injection",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtSuspendThread",
+      "hook_module": "ntdll.dll",
+      "category": "injection",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtOpenProcessToken",
+      "hook_module": "ntdll.dll",
+      "category": "token",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtDuplicateToken",
+      "hook_module": "ntdll.dll",
+      "category": "token",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtAdjustPrivilegesToken",
+      "hook_module": "ntdll.dll",
+      "category": "token",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtReadVirtualMemory",
+      "hook_module": "ntdll.dll",
+      "category": "memory",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        10
+      ],
+      "join_artifact": "cross-process only; target_pid \u2194 TargetProcessId",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtUnmapViewOfSection",
+      "hook_module": "ntdll.dll",
+      "category": "memory",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        25
+      ],
+      "join_artifact": "cross-process only; target_pid \u2194 ProcessId (tampered image)",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtUnmapViewOfSectionEx",
+      "hook_module": "ntdll.dll",
+      "category": "memory",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        25
+      ],
+      "join_artifact": "cross-process only; target_pid \u2194 ProcessId (tampered image)",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtAllocateVirtualMemoryEx",
+      "hook_module": "ntdll.dll",
+      "category": "memory",
+      "coverage": "both",
+      "sysmon_counterparts": [
+        10
+      ],
+      "join_artifact": "cross-process only; target_pid \u2194 TargetProcessId",
+      "blind_spot": [
+        "unhook",
+        "direct_syscall"
+      ]
+    },
+    {
+      "api": "NtMapViewOfSectionEx",
+      "hook_module": "ntdll.dll",
+      "category": "memory",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtQueueApcThreadEx",
+      "hook_module": "ntdll.dll",
+      "category": "injection",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtGetContextThread",
+      "hook_module": "ntdll.dll",
+      "category": "injection",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtSetInformationThread",
+      "hook_module": "ntdll.dll",
+      "category": "evasion",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtSetInformationProcess",
+      "hook_module": "ntdll.dll",
+      "category": "evasion",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtCreateTimer",
+      "hook_module": "ntdll.dll",
+      "category": "timing",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtSetTimer",
+      "hook_module": "ntdll.dll",
+      "category": "timing",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtCreateTransaction",
+      "hook_module": "ntdll.dll",
+      "category": "evasion",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    },
+    {
+      "api": "NtRollbackTransaction",
+      "hook_module": "ntdll.dll",
+      "category": "evasion",
+      "coverage": "hook_only",
+      "sysmon_counterparts": [],
+      "join_artifact": null,
+      "blind_spot": []
+    }
+  ],
+  "eid_to_apis": {
+    "1": [
+      "CreateProcessW",
+      "NtCreateUserProcess"
+    ],
+    "7": [
+      "LdrLoadDll"
+    ],
+    "8": [
+      "NtCreateThreadEx",
+      "NtResumeThread"
+    ],
+    "10": [
+      "NtAllocateVirtualMemory",
+      "NtProtectVirtualMemory",
+      "NtWriteVirtualMemory",
+      "NtReadVirtualMemory",
+      "NtAllocateVirtualMemoryEx"
+    ],
+    "11": [
+      "CreateFileW",
+      "NtCreateFile"
+    ],
+    "13": [
+      "NtSetValueKey"
+    ],
+    "25": [
+      "NtUnmapViewOfSection",
+      "NtUnmapViewOfSectionEx"
+    ]
+  },
+  "sysmon_only_eids": [
+    2,
+    3,
+    5,
+    6,
+    9,
+    12,
+    14,
+    15,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    26
+  ]
+}

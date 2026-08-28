@@ -1,0 +1,144 @@
+# Copyright (C) 2015 Will Metcalf (william.metcalf@gmail.com)
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+try:
+    import re2 as re
+except ImportError:
+    import re
+
+from lib.cuckoo.common.abstracts import Signature
+
+# run through re.escape()
+#############################################
+# YOU MAY HAVE TO CUSTOMIZE THIS FOR YOUR ENV#
+#############################################
+white_list_re = (
+    r"C\\:\\Program Files(?:\s\\(x86\\))?\\Adobe\\Reader\\ \\d+\\.\\d+\\Reader\\AcroRd32\\.exe$",
+    r"C\\:\\Program Files(?:\s\\(x86\\))?\\Java\\jre\\d+\\bin\\j(?:avaw?|p2launcher)\\.exe$",
+    r"C\\:\\Program Files(?:\s\\(x86\\))?\\Microsoft SilverLight\\(?:\\d+\\.)+\\d\\agcp\\.exe$",
+    r"C\\:\\Windows\\System32\\ntvdm\\.exe$",
+    r"C\\:\\Windows\\System32\\svchost\\.exe$",
+    r"C\\:\\Program Files(?:\s\\(x86\\))?\\internet explorer\\iexplore\.exe$",
+    # remove this one at some point
+    r"C\\:\\Windows\\System32\\rundll32\\.exe$",
+    r"C\\:\\Windows\\System32\\drwtsn32\\.exe$",
+    r"C\\:\\Windows\\splwow64\\.exe$",
+    r"C\\:\\Program Files(?:\s\\(x86\\))?\\Common Files\\Microsoft Shared\\office1[1-6]\\off(?:lb|diag)\\.exe$",
+    r"C\\:\\Program Files(?:\s\\(x86\\))?\\Common Files\\Microsoft Shared\\dw\\dw(?:20)?\\.exe$",
+    r"C\\:\\Windows\\system32\\dwwin\\.exe$",
+    r"C\\:\\Windows\\system32\\WerFault\\.exe$",
+    r"C\\:\\Windows\\syswow64\\WerFault\\.exe$",
+)
+
+
+class MartiansOffice(Signature):
+    name = "office_martian_children"
+    description = "Martian Subprocess Started By Office Process"
+    severity = 3
+    weight = 3
+    categories = ["martians"]
+    authors = ["Will Metcalf"]
+    minimum = "1.3"
+    ttps = ["T1059"]  # MITRE v6,7,8
+    mbcs = ["OB0009", "E1059"]
+
+    def go_deeper(self, pdict, result=None):
+        if result is None:
+            result = []
+        result.append(pdict["module_path"].lower())
+        for e in pdict["children"]:
+            self.go_deeper(e, result)
+        return result
+
+    def find_martians(self, ptree, pwlist):
+        result = []
+        if ptree["children"]:
+            children = self.go_deeper(ptree)
+            for child in children:
+                match_found = False
+                for entry in pwlist:
+                    if entry.search(child):
+                        match_found = True
+                if not match_found:
+                    result.append(child)
+        return result
+
+    def run(self):
+        if self.results.get("target", {}).get("category", "") == "url":
+            return False
+
+        office_pkgs = ["ppt", "doc", "xls", "eml"]
+        if not any(e in self.results["info"]["package"] for e in office_pkgs):
+            return False
+
+        self.office_paths_re = re.compile(
+            r"^[A-Z]\:\\Program Files(?:\s\(x86\))?\\Microsoft Office\\(?:Office1[1-5]\\)?(?:WINWORD|OUTLOOK|POWERPNT|EXCEL|WORDVIEW)\.EXE$",
+            re.I,
+        )
+
+        # means we can be evaded but also means we can have relatively tight paths between 32-bit and 64-bit
+        self.white_list_re_compiled = []
+        for entry in white_list_re:
+            try:
+                self.white_list_re_compiled.append(re.compile(entry, re.I))
+            except Exception as e:
+                print("failed to compile expression %s error:%s" % (entry, e))
+        self.white_list_re_compiled.append(self.office_paths_re)
+
+        # Sometimes if we get a service loaded we get out of order processes in tree need iterate over IE processes get the path of the initial monitored executable
+        self.initialpath = None
+        processes = self.results["behavior"]["processtree"]
+        if len(processes):
+            for p in processes:
+                initialpath = p["module_path"].lower()
+                if initialpath and self.office_paths_re.match(initialpath) and "children" in p:
+                    self.martians = self.find_martians(p, self.white_list_re_compiled)
+                    if len(self.martians) > 0:
+                        for martian in self.martians:
+                            self.data.append({"office_martian": martian})
+                        return True
+
+        # Also check COM-logical children: processes whose com_logical_parent_pid
+        # points to an Office process (LethalHTA / DCOM broker pattern).
+        office_pids = set()
+
+        def _collect_office_pids(nodes):
+            for n in nodes:
+                if self.office_paths_re.match((n.get("module_path") or "").lower()):
+                    office_pids.add(n["pid"])
+                _collect_office_pids(n.get("children") or [])
+
+        _collect_office_pids(processes)
+
+        def _check_com_martians(nodes):
+            for n in nodes:
+                if n.get("com_logical_parent_pid") in office_pids:
+                    child_path = (n.get("module_path") or "").lower()
+                    if child_path and not any(wl.search(child_path) for wl in self.white_list_re_compiled):
+                        self.data.append(
+                            {
+                                "office_com_martian": child_path,
+                                "activated_by": "%s (pid %s) via COM"
+                                % (
+                                    n.get("com_logical_parent_name", ""),
+                                    n.get("com_logical_parent_pid", ""),
+                                ),
+                                "clsid_progid": n.get("com_progid") or n.get("com_clsid", ""),
+                            }
+                        )
+                _check_com_martians(n.get("children") or [])
+
+        _check_com_martians(processes)
+        return bool(self.data)

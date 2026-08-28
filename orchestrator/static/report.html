@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Report &middot; PENTAGRAMMA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="css/style.css?v=21" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PENTAGRAMMA</div>
+    <nav>
+      <a href="index.html">Dashboard</a>
+      <a href="live.html">Live Trace</a>
+      <a href="traces.html">Traces</a>
+      <a href="reports.html">Reports</a>
+      <a href="rules.html">Rules</a>
+      <a href="harness.html">Injection Harness</a>
+      <a href="architecture.html">Architecture</a>
+    </nav>
+    <div style="margin-left:auto">
+      <a id="report-json-link" href="#" target="_blank" class="small">raw JSON &nearr;</a>
+    </div>
+  </header>
+
+  <main>
+    <div class="report-head">
+      <div class="report-main">
+        <h1 id="report-title">Loading&hellip;</h1>
+        <div id="report-meta"></div>
+        <div id="screen-view" class="screen-view hidden">
+          <img id="screen-img" alt="VM screen during analysis" />
+          <div id="screen-thumbs" class="screen-thumbs"></div>
+        </div>
+      </div>
+      <div class="report-side">
+        <div id="verdict-card"></div>
+        <details class="aux-details">
+          <summary>Sample</summary>
+          <div class="aux-body" id="sample-meta"></div>
+        </details>
+        <details class="aux-details" id="aux-event-counts">
+          <summary>Event counts</summary>
+          <div class="aux-body"><canvas id="event-chart" height="140"></canvas></div>
+        </details>
+        <div class="stat-grid" id="side-stats"></div>
+
+        <details class="section" id="sec-proctree" open>
+          <summary>Process tree</summary>
+          <div class="section-body">
+            <div class="controls">
+              <label class="small"><input type="checkbox" id="filter-interesting" checked /> interesting only</label>
+              <span id="proctree-stats" class="small muted"></span>
+              <button id="btn-tree-expand" class="secondary">expand all</button>
+              <button id="btn-tree-collapse" class="secondary">collapse all</button>
+            </div>
+            <div id="process-tree"></div>
+          </div>
+        </details>
+
+        <details class="section" id="sec-detections" open>
+          <summary>Detections applied</summary>
+          <div class="section-body" id="detections-body"></div>
+        </details>
+      </div>
+    </div>
+
+    <nav id="section-nav" class="section-nav" aria-label="Report section selector"></nav>
+
+    <!-- ======================= Findings ======================= -->
+
+    <details class="section" id="sec-alerts" open>
+      <summary>Alerts (<span id="alerts-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="controls">
+          <label class="small"><input type="checkbox" id="alerts-group-toggle" checked /> group by type</label>
+          <select id="alerts-source-filter"><option value="">all sources</option></select>
+          <input type="text" id="alerts-search" placeholder="filter alerts&hellip;" style="min-width:220px" />
+        </div>
+        <div id="alerts-groups"></div>
+        <table id="alerts-table">
+          <thead><tr><th>Time</th><th>Event</th><th>PID</th><th>Image / Type</th><th>MITRE</th></tr></thead>
+          <tbody id="alerts-body"></tbody>
+        </table>
+        <div class="controls" id="alerts-pager" style="margin-top:8px">
+          <button id="btn-alerts-prev" class="secondary">&#9664; prev</button>
+          <button id="btn-alerts-next" class="secondary">next &#9654;</button>
+          <span id="alerts-page-label" class="small muted"></span>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" id="sec-mitre">
+      <summary>MITRE ATT&amp;CK coverage</summary>
+      <div class="section-body">
+        <div class="small muted module-note">Techniques observed in this run, per producing event type. Click a highlighted technique chip to list the events behind that mapping below.</div>
+        <table>
+          <thead><tr><th>Event type</th><th>Count</th><th>Techniques</th></tr></thead>
+          <tbody id="mitre-body"></tbody>
+        </table>
+        <div id="mitre-events" style="margin-top:12px"></div>
+      </div>
+    </details>
+
+    <details class="section" id="sec-detections-wide">
+      <summary>Detections by engine</summary>
+      <div class="section-body" id="detections-wide-body"></div>
+    </details>
+
+    <!-- ======================= Telemetry ======================= -->
+
+    <details class="section" id="sec-injection">
+      <summary>Injection &amp; memory (<span id="injection-count">0</span>)</summary>
+      <div class="section-body" id="injection-body"></div>
+    </details>
+
+    <details class="section" id="sec-hooks">
+      <summary>API trace / hooks (<span id="hooks-count">0</span>)</summary>
+      <div class="section-body">
+        <div id="hooks-summary"></div>
+        <details class="aux-details" style="margin:10px 0">
+          <summary>Active hookset (<span id="hooks-active-count">0</span> hooks)</summary>
+          <div class="aux-body" id="hooks-inventory"></div>
+        </details>
+        <div class="controls">
+          <input type="text" id="hooks-search" placeholder="filter by API name or argument text&hellip;" style="min-width:280px" />
+          <button id="btn-load-hooks">Load trace</button>
+          <button id="btn-hooks-prev" class="secondary">&#9664; prev</button>
+          <button id="btn-hooks-next" class="secondary">next &#9654;</button>
+          <span id="hooks-page-label" class="small muted"></span>
+        </div>
+        <table>
+          <thead><tr><th>Time</th><th>API</th><th>Category</th><th>PID</th><th>TID</th><th>Arguments</th></tr></thead>
+          <tbody id="hooks-body">
+            <tr><td colspan="6" class="empty-state">Click "Load trace" to dump every hooked call.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <details class="section" id="sec-blindspots">
+      <summary>Blind spots &mdash; unhooking detection (<span id="blindspots-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted module-note">API-trace &harr; Sysmon counterpart correlation (curated in <span class="mono">orchestrator/data/coverage_map.yaml</span>): every Sysmon event in a &ldquo;both&rdquo;-class family should have a hooked-call counterpart from the same process within a 2s window. &ge;2 misses per process/hook = the sample is unhooking the monitor or using direct syscalls (<b>ApitraceBlindSpot</b>, T1562.001); a trace that goes silent while Sysmon stays active = <b>ApitraceSilence</b>. See <span class="mono">docs/coverage-table.md</span>.</div>
+        <div id="blindspots-coverage" style="margin-bottom:10px"></div>
+        <div id="blindspots-browser"></div>
+      </div>
+    </details>
+
+    <details class="section" id="sec-scripts">
+      <summary>Scripts &mdash; AMSI &amp; PowerShell (<span id="scripts-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted module-note">Deobfuscated script content captured in-guest: PowerShell script-block logging, plus AMSI scan results from any scripting engine (PowerShell, JScript, VBScript, Office macros). This is the main window into script-based stages.</div>
+        <h3>PowerShell script blocks (<span id="ps-blocks-count">0</span>)</h3>
+        <div id="ps-blocks-body"><div class="empty-state small">Not loaded yet &mdash; open this tab to fetch.</div></div>
+        <h3 style="margin-top:16px">AMSI scans</h3>
+        <div id="amsi-browser"></div>
+      </div>
+    </details>
+
+    <details class="section" id="sec-processes">
+      <summary>Processes (<span id="processes-count">0</span>)</summary>
+      <div class="section-body">
+        <h3>Execution output</h3>
+        <div id="execution-body"></div>
+        <h3 style="margin-top:16px">Process lifetime <span class="muted small">(Sysmon EID 1 create / 5 terminate)</span></h3>
+        <div id="processes-browser"></div>
+      </div>
+    </details>
+
+    <details class="section" id="sec-filesystem">
+      <summary>Filesystem (<span id="filesystem-count">0</span>)</summary>
+      <div class="section-body">
+        <h3>Dropped files (<span id="dropped-files-count">0</span>)</h3>
+        <div id="dropped-files-body"></div>
+        <h3 style="margin-top:16px">File events <span class="muted small">(Sysmon EID 2 time-change / 11 create / 15 stream / 23 delete / 26 delete-detected)</span></h3>
+        <div id="files-browser"></div>
+      </div>
+    </details>
+
+    <details class="section" id="sec-registry">
+      <summary>Registry (<span id="registry-count">0</span>)</summary>
+      <div class="section-body">
+        <h3>Persistence indicators (<span id="ioc-registry-count">0</span>)</h3>
+        <div id="ioc-registry-body"></div>
+        <h3 style="margin-top:16px">Registry events <span class="muted small">(Sysmon EID 12 create/delete / 13 value set / 14 rename)</span></h3>
+        <div id="registry-browser"></div>
+      </div>
+    </details>
+
+    <details class="section" id="sec-eventlogs">
+      <summary>Event logs &mdash; Security/System/Defender (<span id="eventlogs-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted module-note">Windows event-log channels collected in-guest: Security (privilege use, object/registry access, logons, scheduled tasks&hellip;), System, and Microsoft Defender (threat detections with names and severities).</div>
+        <div id="eventlogs-browser"></div>
+      </div>
+    </details>
+
+    <details class="section" id="sec-sysmon-other">
+      <summary>Sysmon &mdash; other (<span id="sysmon-other-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted module-note">Less-frequently-fired Sysmon families, in one stream: driver loads (EID 6), named pipes (17 created / 18 connected), WMI subscriptions (19&ndash;21, if collected), clipboard capture (24), file-block events (27&ndash;29) and Sysmon's own error/diagnostic channel (255).</div>
+        <div id="sysmon-other-browser"></div>
+      </div>
+    </details>
+
+    <!-- ======================= Network ======================= -->
+
+    <details class="section" id="sec-network">
+      <summary>Network (<span id="network-packets-count">0</span> packets)</summary>
+      <div class="section-body">
+        <div class="grid cols-3">
+          <div>
+            <h3>Connections (<span id="ioc-connections-count">0</span>)</h3>
+            <div id="ioc-connections-body"></div>
+          </div>
+          <div>
+            <h3>Domains (<span id="ioc-domains-count">0</span>)</h3>
+            <div id="ioc-domains-body"></div>
+          </div>
+          <div>
+            <h3>HTTP requests (<span id="ioc-http-count">0</span>)</h3>
+            <div id="ioc-http-body"></div>
+          </div>
+        </div>
+        <h3 style="margin-top:16px">Network events <span class="muted small">(Sysmon EID 3 connect / 22 DNS query)</span></h3>
+        <div id="network-events-browser"></div>
+        <h3 style="margin-top:16px">Packet capture</h3>
+        <div id="network-meta"></div>
+        <div id="network-visualizer" style="margin-top:12px"></div>
+      </div>
+    </details>
+
+    <!-- ======================= Artifacts ======================= -->
+
+    <details class="section" id="sec-dumps">
+      <summary>Process dumps (<span id="process-dumps-count">0</span>)</summary>
+      <div class="section-body" id="process-dumps-body"></div>
+    </details>
+
+    <details class="section" id="sec-screenshots">
+      <summary>Screenshots</summary>
+      <div class="section-body">
+        <div id="screenshots-meta"></div>
+        <div id="screenshots-gallery" style="margin-top:12px"></div>
+      </div>
+    </details>
+
+    <!-- ======================= Analysis ======================= -->
+
+    <details class="section" id="sec-static">
+      <summary>Static analysis</summary>
+      <div class="section-body" id="static-analysis-body"></div>
+    </details>
+
+    <details class="section" id="environment-alerts-section">
+      <summary>Environment / baseline noise (<span id="environment-alerts-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted" style="margin-bottom:8px">Alerts not attributable to the sample's own process lineage -- the sandbox's own tooling (Sysmon reconfiguration, network capture, telemetry collector) or unrelated background activity. Shown here rather than dropped, in case anything is misclassified. Loaded on demand (can be tens of thousands of entries) -- expand to fetch.</div>
+        <table>
+          <thead><tr><th>Time</th><th>Event</th><th>PID</th><th>Image / Type</th><th>MITRE</th></tr></thead>
+          <tbody id="environment-alerts-body">
+            <tr><td colspan="5" class="empty-state">Expand to load.</td></tr>
+          </tbody>
+        </table>
+        <div class="controls" style="margin-top:8px">
+          <button id="btn-env-alerts-prev" class="secondary">&#9664; prev</button>
+          <button id="btn-env-alerts-next" class="secondary">next &#9654;</button>
+          <span id="env-alerts-page-label" class="small muted"></span>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" id="events-browser">
+      <summary>Raw event browser (<span id="events-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="controls">
+          <select id="events-type-filter"><option value="">all types</option></select>
+          <select id="events-source-filter"><option value="">all sources</option></select>
+          <input type="text" id="events-search" placeholder="search&hellip;" />
+          <button id="btn-load-events">Load events</button>
+          <button id="btn-events-prev" class="secondary">&#9664; prev</button>
+          <button id="btn-events-next" class="secondary">next &#9654;</button>
+          <span id="events-page-label" class="small muted"></span>
+        </div>
+        <table>
+          <thead><tr><th>Time</th><th>Type</th><th>Data</th></tr></thead>
+          <tbody id="events-body">
+            <tr><td colspan="3" class="empty-state">Click "Load events" to browse the raw stream.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+  </main>
+
+  <script src="vendor/chart.umd.min.js"></script>
+  <script src="js/api.js?v=10"></script>
+  <script src="js/event_browser.js?v=3"></script>
+  <script src="js/network_view.js?v=10"></script>
+  <script src="js/screenshot_view.js?v=7"></script>
+  <script src="js/report_detail.js?v=25"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "description": "Labeled detection corpus for scripts/detection_metrics.py. Each entry maps a report (by analysis_id 'report', sample 'sha256', or sample 'filename') to a ground-truth 'label' (malicious|benign). The metrics harness resolves every label to the matching reports in reports/, replays the CURRENT detection pipeline over each (scripts/replay_detection.py), and measures precision/recall/FPR against these labels. Seed it with the detection_tests scenarios (known ground truth); grow it by detonating real malware-by-family and a benign/goodware set, then labeling the resulting reports (see `detection_metrics.py --bootstrap` for a labeling worklist over existing reports). Filename matches every run of that sample -- fine for the detection_tests corpus, which is deliberately re-run many times.",
+  "labels": [
+    { "match": { "filename": "benign_control.bat" }, "label": "benign", "note": "detection_tests false-positive guard" },
+
+    { "match": { "filename": "gw_admin_inventory.ps1" }, "label": "benign", "family": "goodware", "note": "goodware FP-guard: process/service enumeration + system dir listing" },
+    { "match": { "filename": "gw_cim_sysinfo.ps1" }, "label": "benign", "family": "goodware", "note": "goodware FP-guard: WMI/CIM system-info queries + whoami" },
+    { "match": { "filename": "gw_registry_read.ps1" }, "label": "benign", "family": "goodware", "note": "goodware FP-guard: read-only Run/Uninstall registry inspection" },
+    { "match": { "filename": "gw_scheduled_tasks.ps1" }, "label": "benign", "family": "goodware", "note": "goodware FP-guard: read-only scheduled-task inventory" },
+    { "match": { "filename": "gw_file_hash_manifest.ps1" }, "label": "benign", "family": "goodware", "note": "goodware FP-guard: TEMP file create + SHA-256 hashing + cleanup" },
+    { "match": { "filename": "gw_archive_roundtrip.ps1" }, "label": "benign", "family": "goodware", "note": "goodware FP-guard: Compress/Expand-Archive round-trip in TEMP" },
+    { "match": { "filename": "gw_netconfig.bat" }, "label": "benign", "family": "goodware", "note": "goodware FP-guard: read-only ipconfig/netstat/arp/route" },
+    { "match": { "filename": "gw_signed_tools.bat" }, "label": "benign", "family": "goodware", "note": "goodware FP-guard: signed MS tools tasklist/driverquery/where/systeminfo" },
+
+    { "match": { "filename": "lolbin_cradle.bat" }, "label": "malicious", "family": "lolbin", "note": "detection_tests" },
+    { "match": { "filename": "amsi_detection.ps1" }, "label": "malicious", "family": "amsi", "note": "detection_tests" },
+    { "match": { "filename": "persistence_runkey.ps1" }, "label": "malicious", "family": "persistence", "note": "detection_tests" },
+    { "match": { "filename": "process_injection.exe" }, "label": "malicious", "family": "injection", "note": "detection_tests (compiled variant)" },
+    { "match": { "filename": "mass_file_modification.ps1" }, "label": "malicious", "family": "ransomware", "note": "detection_tests" },
+    { "match": { "filename": "credential_access_lsass.ps1" }, "label": "malicious", "family": "credential-access", "note": "detection_tests" },
+    { "match": { "filename": "defender_tampering.ps1" }, "label": "malicious", "family": "defense-evasion", "note": "detection_tests" },
+    { "match": { "filename": "lolbin_certutil_download.bat" }, "label": "malicious", "family": "lolbin", "note": "detection_tests (Defender catches it -> DefenderThreatDetected)" },
+    { "match": { "filename": "c2_named_pipe.ps1" }, "label": "malicious", "family": "c2", "note": "detection_tests (Cobalt Strike default pipe)" },
+    { "match": { "filename": "wmi_persistence.ps1" }, "label": "malicious", "family": "persistence", "note": "detection_tests (WMI event sub)" }
+  ]
+}

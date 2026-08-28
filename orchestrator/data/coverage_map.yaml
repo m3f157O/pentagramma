@@ -1,0 +1,325 @@
+# Curated semantic coverage map: MinHook apitrace hooks <-> Sysmon events.
+#
+# One entry per hook in kHooks[] (agent/windows/monitor_src/monitor/monitor.cpp).
+# "both"    -- the behavior is visible to BOTH the user-mode hook and Sysmon;
+#              these are the hooks where a runtime blind spot (unhooking,
+#              direct syscalls) is detectable by cross-referencing the two
+#              telemetry sources.
+# "hook_only" -- no Sysmon counterpart exists; only the apitrace sees it.
+#
+# Sysmon-only EIDs (enabled in sysmonconfig.xml, no hook counterpart):
+#   3 (NetworkConnect), 5 (ProcessTerminate), 6 (DriverLoad), 9 (RawAccessRead),
+#   12/14 (RegistryCreateDelete / RegistryKeyValueRename), 15 (FileCreateStreamHash),
+#   17/18 (PipeEvent), 19-21 (WmiEvent), 22 (DnsQuery), 24 (ClipboardChange),
+#   26 (FileDeleteDetected).
+#
+# The `gap` class -- visible to NEITHER source:
+#   - direct syscalls with a spoofed/unhooked ntdll (bypasses the hooks AND
+#     Sysmon's user-mode-adjacent telemetry is not guaranteed either),
+#   - KnownDlls remapping (a remapped clean ntdll defeats hook placement),
+#   - in-process memory writes via plain memcpy (no API call at all).
+#
+# Regenerate the derived artifacts after editing:
+#   .venv\Scripts\python.exe scripts\build_coverage_table.py
+
+- api: CreateFileW
+  hook_module: kernel32.dll
+  category: file
+  coverage: both
+  # Only EID 11 (FileCreate) is a reliable counterpart: EID 2/23 (timestomp,
+  # delete) flow through NtOpenFile + NtSetInformationFile(FileDisposition),
+  # which are NOT hooked -- counting them produced a benign-guest FP
+  # (powershell [IO.File]::Delete, dressed image, 2026-08-17).
+  sysmon_counterparts: [11]
+  join_artifact: "arg0 path ↔ TargetFilename (weak, prefix ok)"
+  blind_spot: [unhook, direct_syscall]
+
+- api: CreateProcessW
+  hook_module: kernel32.dll
+  category: process
+  coverage: both
+  sysmon_counterparts: [1]
+  join_artifact: "child_pid ↔ ProcessId"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtCreateFile
+  hook_module: ntdll.dll
+  category: file
+  coverage: both
+  # Same as CreateFileW: EID 2/23 excluded (NtOpenFile/NtSetInformationFile
+  # paths are unhooked); only FileCreate reliably implies the hooked API ran.
+  sysmon_counterparts: [11]
+  join_artifact: "arg0 path ↔ TargetFilename (weak, prefix ok)"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtAllocateVirtualMemory
+  hook_module: ntdll.dll
+  category: memory
+  coverage: both
+  sysmon_counterparts: [10]
+  join_artifact: "cross-process only; target_pid ↔ TargetProcessId"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtProtectVirtualMemory
+  hook_module: ntdll.dll
+  category: memory
+  coverage: both
+  sysmon_counterparts: [10]
+  join_artifact: "cross-process only; target_pid ↔ TargetProcessId"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtWriteVirtualMemory
+  hook_module: ntdll.dll
+  category: memory
+  coverage: both
+  sysmon_counterparts: [10]
+  join_artifact: "cross-process only; target_pid ↔ TargetProcessId"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtMapViewOfSection
+  hook_module: ntdll.dll
+  category: memory
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtCreateThreadEx
+  hook_module: ntdll.dll
+  category: injection
+  coverage: both
+  sysmon_counterparts: [8]
+  join_artifact: "cross-process only; target_pid ↔ TargetProcessId"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtResumeThread
+  hook_module: ntdll.dll
+  category: injection
+  coverage: both
+  sysmon_counterparts: [8]
+  join_artifact: "cross-process only; target_pid ↔ TargetProcessId"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtSetValueKey
+  hook_module: ntdll.dll
+  category: registry
+  coverage: both
+  sysmon_counterparts: [13]
+  join_artifact: "arg0 value name ↔ TargetObject"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtCreateUserProcess
+  hook_module: ntdll.dll
+  category: process
+  coverage: both
+  sysmon_counterparts: [1]
+  join_artifact: "child_pid ↔ ProcessId"
+  blind_spot: [unhook, direct_syscall]
+
+- api: LdrLoadDll
+  hook_module: ntdll.dll
+  category: loader
+  coverage: both
+  sysmon_counterparts: [7]
+  join_artifact: "arg0 path ↔ ImageLoaded"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtDelayExecution
+  hook_module: ntdll.dll
+  category: timing
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: GetTickCount64
+  hook_module: kernel32.dll
+  category: timing
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtQuerySystemTime
+  hook_module: ntdll.dll
+  category: timing
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: BCryptEncrypt
+  hook_module: bcrypt.dll
+  category: crypto
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: BCryptDecrypt
+  hook_module: bcrypt.dll
+  category: crypto
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: BCryptHashData
+  hook_module: bcrypt.dll
+  category: crypto
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtQueueApcThread
+  hook_module: ntdll.dll
+  category: injection
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtSetContextThread
+  hook_module: ntdll.dll
+  category: injection
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtSuspendThread
+  hook_module: ntdll.dll
+  category: injection
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtOpenProcessToken
+  hook_module: ntdll.dll
+  category: token
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtDuplicateToken
+  hook_module: ntdll.dll
+  category: token
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtAdjustPrivilegesToken
+  hook_module: ntdll.dll
+  category: token
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtReadVirtualMemory
+  hook_module: ntdll.dll
+  category: memory
+  coverage: both
+  sysmon_counterparts: [10]
+  join_artifact: "cross-process only; target_pid ↔ TargetProcessId"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtUnmapViewOfSection
+  hook_module: ntdll.dll
+  category: memory
+  coverage: both
+  sysmon_counterparts: [25]
+  join_artifact: "cross-process only; target_pid ↔ ProcessId (tampered image)"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtUnmapViewOfSectionEx
+  hook_module: ntdll.dll
+  category: memory
+  coverage: both
+  sysmon_counterparts: [25]
+  join_artifact: "cross-process only; target_pid ↔ ProcessId (tampered image)"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtAllocateVirtualMemoryEx
+  hook_module: ntdll.dll
+  category: memory
+  coverage: both
+  sysmon_counterparts: [10]
+  join_artifact: "cross-process only; target_pid ↔ TargetProcessId"
+  blind_spot: [unhook, direct_syscall]
+
+- api: NtMapViewOfSectionEx
+  hook_module: ntdll.dll
+  category: memory
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtQueueApcThreadEx
+  hook_module: ntdll.dll
+  category: injection
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtGetContextThread
+  hook_module: ntdll.dll
+  category: injection
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtSetInformationThread
+  hook_module: ntdll.dll
+  category: evasion
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtSetInformationProcess
+  hook_module: ntdll.dll
+  category: evasion
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtCreateTimer
+  hook_module: ntdll.dll
+  category: timing
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtSetTimer
+  hook_module: ntdll.dll
+  category: timing
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtCreateTransaction
+  hook_module: ntdll.dll
+  category: evasion
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []
+
+- api: NtRollbackTransaction
+  hook_module: ntdll.dll
+  category: evasion
+  coverage: hook_only
+  sysmon_counterparts: []
+  join_artifact: null
+  blind_spot: []

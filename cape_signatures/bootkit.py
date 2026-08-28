@@ -1,0 +1,311 @@
+# Copyright (C) 2014 Optiv, Inc. (brad.spengler@optiv.com)
+# This file is part of Cuckoo Sandbox - http://www.cuckoosandbox.org
+# See the file 'docs/LICENSE' for copying permission.
+
+from lib.cuckoo.common.abstracts import Signature
+
+
+class Bootkit(Signature):
+    name = "bootkit"
+    description = "Likely installs a bootkit via raw harddisk modifications"
+    severity = 3
+    categories = ["rootkit"]
+    authors = ["Optiv"]
+    minimum = "1.2"
+    evented = True
+    ttps = ["T1067"]  # MITRE v6
+    ttps += ["T1542", "T1542.003"]  # MITRE v7,8
+    mbcs = ["OB0006", "F0013"]
+
+    filter_apinames = set(
+        [
+            "NtCreateFile",
+            "NtDuplicateObject",
+            "NtOpenFile",
+            "NtClose",
+            "NtSetInformationFile",
+            "NtWriteFile",
+            "DeviceIoControl",
+            "NtDeviceIoControlFile",
+        ]
+    )
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.lastprocess = 0
+        self.handles = dict()
+        self.saw_stealth = False
+
+    def on_call(self, call, process):
+        if process is not self.lastprocess:
+            self.handles = dict()
+            self.lastprocess = process
+
+        if call["api"] == "NtDuplicateObject" and call["status"]:
+            tgtarg = self.get_argument(call, "TargetHandle")
+            if tgtarg:
+                srchandle = int(self.get_argument(call, "SourceHandle"), 16)
+                tgthandle = int(tgtarg, 16)
+                if srchandle in self.handles:
+                    self.handles[tgthandle] = self.handles[srchandle]
+        elif call["api"] == "NtClose":
+            handle = int(self.get_argument(call, "Handle"), 16)
+            self.handles.pop(handle, None)
+        elif (call["api"] == "NtCreateFile" or call["api"] == "NtOpenFile") and call["status"]:
+            filename = self.get_argument(call, "FileName")
+            handle = int(self.get_argument(call, "FileHandle"), 16)
+            access = int(self.get_argument(call, "DesiredAccess"), 16)
+            # FILE_WRITE_ACCESS or GENERIC_WRITE
+            if (
+                filename
+                and (filename.lower() == "\\??\\physicaldrive0" or filename.lower().startswith("\\device\\harddisk"))
+                and access & 0x40000002
+            ):
+                if handle not in self.handles:
+                    self.handles[handle] = filename
+        elif call["api"] == "DeviceIoControl" or call["api"] == "NtDeviceIoControlFile":
+            ioctl = int(self.get_argument(call, "IoControlCode"), 16)
+            if call["api"] == "DeviceIoControl":
+                handle = int(self.get_argument(call, "DeviceHandle"), 16)
+            else:
+                handle = int(self.get_argument(call, "FileHandle"), 16)
+            # IOCTL_SCSI_PASS_THROUGH_DIRECT
+            if handle in self.handles and ioctl == 0x4D014:
+                if self.pid:
+                    self.mark_call()
+                return True
+        elif call["api"] == "NtWriteFile":
+            handle = int(self.get_argument(call, "FileHandle"), 16)
+            if handle in self.handles:
+                if self.pid:
+                    self.mark_call()
+                return True
+
+        return None
+
+
+class DirectHDDAccess(Signature):
+    name = "direct_hdd_access"
+    description = "Attempted to write to a harddisk volume"
+    severity = 3
+    categories = ["bootkit", "rootkit", "wiper"]
+    authors = ["Kevin Ross"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1067"]  # MITRE v6
+    ttps += ["T1014"]  # MITRE v6,7,8
+    ttps += ["T1542", "T1542.003"]  # MITRE v7,8
+    mbcs = ["OB0006", "E1014", "F0013"]
+
+    filter_apinames = set(["NtWriteFile"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.ret = False
+
+    def on_call(self, call, process):
+        handle_name = origfile = self.get_argument(call, "HandleName")
+        if handle_name and handle_name.lower().startswith(r"\device\harddiskvolume"):
+            self.ret = True
+            self.mark_call()
+
+    def on_complete(self):
+        return self.ret
+
+
+class PhysicalDriveAccess(Signature):
+    name = "physical_drive_access"
+    description = "Attempted to write directly to a physical drive"
+    severity = 3
+    categories = ["bootkit", "rootkit", "wiper"]
+    authors = ["Kevin Ross"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1067"]  # MITRE v6
+    ttps += ["T1014"]  # MITRE v6,7,8
+    ttps += ["T1542", "T1542.003"]  # MITRE v7,8
+    mbcs = ["OB0006", "E1014", "F0013"]
+
+    filter_apinames = {"NtCreateFile", "NtWriteFile", "DeviceIoControl", "NtDeviceIoControlFile"}
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.ret = False
+        self.physical_handles = set()
+        self.suspiciouscontrolcodes = {
+            0x0007C054,  # IOCTL_DISK_SET_DRIVE_LAYOUT_EX (Destroys partitions)
+            0x00090020,  # FSCTL_DISMOUNT_VOLUME (Forces OS to drop handles for raw writing)
+            0x00090018,  # FSCTL_LOCK_VOLUME (Locks volume for exclusive raw access)
+            0x0056C00C,  # IOCTL_VOLUME_OFFLINE (Takes the volume offline)
+            0x00222408,  # IOCTL_SCSI_MINIPORT (Direct SCSI commands)
+            0x0004D004,  # IOCTL_SCSI_PASS_THROUGH (Direct SCSI hardware commands)
+            0x0004D014,  # IOCTL_SCSI_PASS_THROUGH_DIRECT (Direct SCSI memory mapping)
+            0x0004B028,  # IOCTL_ATA_PASS_THROUGH (Direct ATA hardware commands)
+            0x0004B02C,  # IOCTL_ATA_PASS_THROUGH_DIRECT (Direct ATA memory mapping)
+        }
+
+    def on_call(self, call, process):
+        if call["api"] == "NtCreateFile":
+            handle_name = self.get_argument(call, "FileName")
+            if handle_name and handle_name.lower().startswith((r"\device\harddisk", r"\??\physicaldrive")):
+                handle = self.get_argument(call, "FileHandle")
+                if handle:
+                    self.physical_handles.add(handle)
+
+        elif call["api"] == "NtWriteFile":
+            handle_name = self.get_argument(call, "HandleName")
+            handle = self.get_argument(call, "FileHandle")
+            if (handle_name and handle_name.lower().startswith((r"\device\harddisk", r"\??\physicaldrive"))) or (
+                handle in self.physical_handles
+            ):
+                self.ret = True
+                self.mark_call()
+
+        elif call["api"] in ["DeviceIoControl", "NtDeviceIoControlFile"]:
+            controlcode = self.get_argument(call, "IoControlCode")
+            if controlcode is not None:
+                try:
+                    code_val = int(controlcode, 16) if isinstance(controlcode, str) else int(controlcode)
+                    if code_val in self.suspiciouscontrolcodes:
+                        self.ret = True
+                        self.mark_call()
+                except (ValueError, TypeError):
+                    pass
+
+    def on_complete(self):
+        return self.ret
+
+
+class EnumeratesPhysicalDrives(Signature):
+    name = "enumerates_physical_drives"
+    description = "Enumerates physical drives"
+    severity = 3
+    categories = ["bootkit", "rootkit", "wiper"]
+    authors = ["Kevin Ross"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1067"]  # MITRE v6
+    ttps += ["T1014"]  # MITRE v6,7,8
+    ttps += ["T1542", "T1542.003"]  # MITRE v7,8
+    mbcs = ["OB0006", "E1014", "F0013"]
+
+    def run(self):
+        enumerateddrives = 0
+        ret = False
+        matches = self.check_file(pattern=r"^\\\?\?\\PhysicalDrive.*", regex=True, all=True)
+        if matches:
+            for match in matches:
+                self.data.append({"physical drive access": match})
+                enumerateddrives += 1
+
+        if enumerateddrives > 1:
+            ret = True
+
+        return ret
+
+
+class PotentialOverWriteMBR(Signature):
+    name = "potential_overwrite_mbr"
+    description = "Wrote 512 bytes to physical drive potentially indicative of overwriting the Master Boot Record (MBR)"
+    severity = 3
+    categories = ["bootkit"]
+    authors = ["Kevin Ross"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1067"]
+
+    filter_apinames = set(["NtWriteFile"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.ret = False
+
+    def on_call(self, call, process):
+        if call["api"] == "NtWriteFile":
+            handle_name = self.get_raw_argument(call, "HandleName")
+            writelength = self.get_raw_argument(call, "Length")
+
+            if handle_name and handle_name.lower().startswith((r"\device\harddisk", r"\??\physicaldrive")) and writelength == 512:
+                self.data.append({"modified_drive": "%s" % (handle_name)})
+                self.ret = True
+                if self.pid:
+                    self.mark_call()
+
+    def on_complete(self):
+        return self.ret
+
+
+class SuspiciousIOControlCodes(Signature):
+    name = "suspicious_iocontrol_codes"
+    description = "Uses suspicious IO control codes, indicative of disk enumeration or a bootkit/wiper"
+    severity = 3
+    categories = ["bootkit", "rootkit", "wiper"]
+    authors = ["Kevin Ross"]
+    minimum = "1.3"
+    evented = True
+    ttps = ["T1067"]
+
+    filter_apinames = set(["DeviceIoControl", "NtDeviceIOControl"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.ret = False
+        self.suspiciouscontrolcodes = {
+            0x00070000,  # IOCTL_DISK_GET_DRIVE_GEOMETRY - Identifies disk structures
+            0x00560000,  # IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS - Maps physical layout
+            0x002D1080,  # IOCTL_STORAGE_QUERY_PROPERTY - Reveals underlying hardware info
+            0x00070050,  # IOCTL_DISK_GET_DRIVE_LAYOUT_EX - Maps partitions
+            0x0007C054,  # IOCTL_DISK_SET_DRIVE_LAYOUT_EX - Modifies/Destroys partitions
+            0x00090020,  # FSCTL_DISMOUNT_VOLUME - Forces OS to drop handles for raw writing
+            0x00090018,  # FSCTL_LOCK_VOLUME - Locks volume for exclusive raw access
+            0x0056C00C,  # IOCTL_VOLUME_OFFLINE - Takes the volume offline
+            0x00222408,  # IOCTL_SCSI_MINIPORT - Direct SCSI commands
+            0x0004D004,  # IOCTL_SCSI_PASS_THROUGH - Direct SCSI hardware commands
+            0x0004D014,  # IOCTL_SCSI_PASS_THROUGH_DIRECT - Direct SCSI memory mapping
+            0x0004B028,  # IOCTL_ATA_PASS_THROUGH - Direct ATA hardware commands
+            0x0004B02C,  # IOCTL_ATA_PASS_THROUGH_DIRECT - Direct ATA memory mapping
+            0x002D1400,  # IOCTL_STORAGE_MANAGE_DATA_SET_ATTRIBUTES - Can be used for raw manipulation
+        }
+
+    def on_call(self, call, process):
+        controlcode = self.get_argument(call, "IoControlCode")
+        if controlcode is not None:
+            try:
+                code_val = int(controlcode, 16) if isinstance(controlcode, str) else int(controlcode)
+                if code_val in self.suspiciouscontrolcodes:
+                    self.ret = True
+                    self.mark_call()
+            except (ValueError, TypeError):
+                pass
+
+    def on_complete(self):
+        return self.ret
+
+
+class ReadFileRawDiskAccess(Signature):
+    name = "read_file_raw_disk_access"
+    description = "Reads the raw physical disk, bypassing standard file system protections. Used by wipers to parse the MFT, or to prepare to install a bootkit."
+    severity = 3
+    confidence = 50
+    categories = ["bootkit", "wiper"]
+    authors = ["Kevin Ross"]
+    minimum = "1.3"
+    evented = True
+    enabled = True
+    ttps = ["T1006", "T1561.002", "T1542.003"]
+    mbcs = ["E1006", "C0032", "F0001"]
+
+    filter_apinames = set(["NtReadFile"])
+
+    def __init__(self, *args, **kwargs):
+        Signature.__init__(self, *args, **kwargs)
+        self.ret = False
+
+    def on_call(self, call, process):
+        handlename = self.get_argument(call, "HandleName")
+        if handlename and handlename.lower().startswith(r"\device\harddisk"):
+            self.ret = True
+            self.mark_call()
+
+    def on_complete(self):
+        return self.ret

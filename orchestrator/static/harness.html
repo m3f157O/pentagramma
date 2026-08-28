@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Injection Harness &middot; PENTAGRAMMA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="css/style.css?v=21" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PENTAGRAMMA</div>
+    <nav>
+      <a href="index.html">Dashboard</a>
+      <a href="live.html">Live Trace</a>
+      <a href="traces.html">Traces</a>
+      <a href="reports.html">Reports</a>
+      <a href="rules.html">Rules</a>
+      <a href="harness.html" class="active">Injection Harness</a>
+      <a href="architecture.html">Architecture</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Injection-harness detection coverage</h1>
+    <p class="small muted">
+      Per-technique pass/fail for <span class="mono">InjectionHarness.exe</span> runs
+      (hollowing, PE replacement, herpaderping, ghosting, AtomBombing, module overloading,
+      SetWindowsHookEx, APC-Ex, MapView) against their expected telemetry signals
+      (Sysmon EID 7/8/10/25 events or API-trace behavioral alerts, per technique).
+      See <span class="mono">PLAN.md</span> / <span class="mono">docs/harness-techniques.md</span>.
+    </p>
+
+    <div class="controls">
+      <button id="btn-run-harness">Rebuild &amp; run harness</button>
+      <span id="run-status" class="small muted"></span>
+    </div>
+
+    <h2>Latest run</h2>
+    <div class="card" id="latest-body">
+      <div class="muted small">Loading&hellip;</div>
+    </div>
+
+    <h2>Trend (last 10 runs)</h2>
+    <table>
+      <thead id="trend-head"></thead>
+      <tbody id="trend-body">
+        <tr><td class="empty-state">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+  </main>
+
+  <script src="js/api.js?v=10"></script>
+  <script src="js/poll.js?v=5"></script>
+  <script src="js/harness.js?v=5"></script>
+</body>
+</html>

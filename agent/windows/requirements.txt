@@ -1,0 +1,12 @@
+# Guest-side telemetry agent dependencies (installed into the analysis VM's
+# Python, not the orchestrator's). pywintrace (FireEye/Mandiant's ctypes ETW
+# wrapper) powers agent/windows/etw_common.py + amsi_collector.py.
+#
+# Vendored rather than pip-installed at analysis time, matching how
+# Sysmon64.exe is shipped rather than downloaded per-run -- install once
+# during golden-snapshot prep:
+#   pip install --no-index --find-links=agent/windows/vendor pywintrace
+#
+# pywintrace has been unmaintained since its 0.2.0 release (2019); it was
+# verified this session to still import and run correctly on Python 3.11.
+pywintrace==0.2.0

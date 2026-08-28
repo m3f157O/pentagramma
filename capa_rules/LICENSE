@@ -1,0 +1,8 @@
+capa_rules/ contains detection rules vendored from
+mandiant/capa-rules (https://github.com/mandiant/capa-rules), Apache-2.0.
+capa_sigs/ contains FLIRT library signatures vendored from mandiant/capa
+(https://github.com/mandiant/capa/tree/master/sigs), Apache-2.0.
+
+Neither is this project's own work; both retain their original license and
+attribution. See .source_label for the exact version vendored here, which must
+match the installed flare-capa version.

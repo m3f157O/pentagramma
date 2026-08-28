@@ -1,0 +1,36 @@
+title: LOLBin / Living-off-the-Land Command Line
+id: c0f1a2b3-1111-4a00-9c01-5a0dbea50b01
+status: experimental
+description: >
+    Process created with a command line matching known living-off-the-land
+    binary abuse patterns (encoded PowerShell, rundll32/regsvr32/mshta/certutil
+    abuse, download cradles). Migrated from orchestrator/heuristics.py's
+    _LOLBIN_COMMAND_PATTERN into a declarative rule (project standardization,
+    phase 2) so it is browsable, tunable and raw-viewable like any Sigma rule.
+
+    Dropped the bare "cmd.exe ... /c|/k " branch on 2026-07-03: it had no
+    discriminating content check at all, so it self-triggered on this
+    sandbox's own launcher command for every .bat/.cmd sample
+    (`cmd.exe /c "C:\Sandbox\sample.bat"`), scoring the benign_control
+    detection-quality scenario "malicious" against real telemetry (caught
+    via tests/test_jobs.py's live-VM queue smoke test). No coverage is lost:
+    every LOLBin this branch could plausibly have caught via a cmd.exe
+    wrapper (e.g. `cmd.exe /c certutil -urlcache ...`) already matches one
+    of the other, content-specific branches below regardless of the cmd.exe
+    prefix, since the regex isn't anchored to the start of the line.
+author: sandbox
+date: 2026/07/03
+tags:
+    - attack.execution
+    - attack.t1059
+    - attack.t1218
+logsource:
+    category: process_creation
+    product: windows
+detection:
+    selection:
+        CommandLine|re|i: 'powershell.{0,200}(-enc\b|-e\s|-encodedcommand|\biwr\b|invoke-webrequest|net\.webclient|downloadstring|downloadfile|frombase64string)|rundll32\.exe\s+\S+,#?\d+|regsvr32\.exe\s+/s\s+/i\s*:|mshta\.exe\s+(http|vbscript|javascript)|certutil\.exe.{0,80}(decode|urlcache|encode)'
+    condition: selection
+falsepositives:
+    - Legitimate administrative scripts using the same utilities
+level: high

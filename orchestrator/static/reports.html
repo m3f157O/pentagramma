@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Reports &middot; PENTAGRAMMA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="css/style.css?v=21" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PENTAGRAMMA</div>
+    <nav>
+      <a href="index.html">Dashboard</a>
+      <a href="live.html">Live Trace</a>
+      <a href="traces.html">Traces</a>
+      <a href="reports.html" class="active">Reports</a>
+      <a href="rules.html">Rules</a>
+      <a href="harness.html">Injection Harness</a>
+      <a href="architecture.html">Architecture</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Analysis history</h1>
+
+    <div class="controls">
+      <input type="text" id="filter-text" placeholder="Search filename / hash / id&hellip;" style="min-width:260px" />
+      <select id="filter-status">
+        <option value="">Any status</option>
+        <option value="completed">completed</option>
+        <option value="failed">failed</option>
+      </select>
+      <select id="filter-verdict">
+        <option value="">Any verdict</option>
+        <option value="malicious">malicious</option>
+        <option value="suspicious">suspicious</option>
+        <option value="clean">clean</option>
+      </select>
+      <select id="filter-timerange" title="How far back to load">
+        <option value="24" selected>last 24 hours</option>
+        <option value="168">last 7 days</option>
+        <option value="0">all history</option>
+      </select>
+      <label class="small"><input type="checkbox" id="filter-harness" /> injection-harness only</label>
+      <button id="btn-refresh" class="secondary">Refresh</button>
+      <span class="small muted" id="result-count"></span>
+    </div>
+
+    <table>
+      <thead id="reports-head"></thead>
+      <tbody id="reports-body">
+        <tr><td colspan="9" class="empty-state">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+
+    <div class="controls" style="margin-top:10px">
+      <button id="btn-page-prev" class="secondary">&#9664; prev</button>
+      <button id="btn-page-next" class="secondary">next &#9654;</button>
+      <span id="page-label" class="small muted"></span>
+    </div>
+  </main>
+
+  <script src="js/api.js?v=10"></script>
+  <script src="js/reports.js?v=7"></script>
+</body>
+</html>

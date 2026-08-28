@@ -1,0 +1,25 @@
+title: AMSI Flagged Content (Detection)
+id: c0f1a2b3-2222-4a00-9c02-5a0dbea50b02
+status: experimental
+description: >
+    AMSI scanned content and actually flagged it -- ScanResult >= 16384, i.e.
+    BLOCKED_BY_ADMIN (0x4000) or DETECTED (0x8000). AMSI stamps a ScanResult on
+    every script block / module manifest it sees, and nearly all are clean
+    (ScanResult 0/1), so gating on a real detection is what keeps this from
+    firing on thousands of benign scans. Migrated from the hardcoded AMSI
+    heuristic into a declarative rule (project standardization, phase 2).
+author: sandbox
+date: 2026/07/03
+tags:
+    - attack.execution
+    - attack.t1059
+logsource:
+    category: amsi
+    product: windows
+detection:
+    selection:
+        ScanResult|gte: 16384
+    condition: selection
+falsepositives:
+    - Unknown
+level: high

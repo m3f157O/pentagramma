@@ -1,0 +1,29 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+pyyaml>=6.0.2
+httpx>=0.27.2
+requests>=2.32.3
+python-multipart>=0.0.17
+aiofiles>=24.1.0
+websockets>=13.0
+
+# Static analysis
+pefile>=2023.2.7
+yara-python>=4.5.0
+filetype>=1.2.0
+ppdeep>=20260221
+# capa capability analysis (orchestrator/capa_analysis.py). Rules + FLIRT sigs
+# are NOT bundled in the wheel -- vendor them version-matched via
+# scripts/vendor_capa_rules.py (see capa_rules/.source_label).
+flare-capa>=9.0.0
+
+# MCP server (mcp_server/)
+mcp[cli]>=1.28.0
+
+# Network capture parsing
+scapy>=2.7.0
+
+# Sigma rule engine (community detection signatures)
+pysigma>=1.4.0

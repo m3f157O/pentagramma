@@ -1,0 +1,42 @@
+{
+  "file": {
+    "order": 1,
+    "description": "File open/create at the Win32 wrapper AND the ntdll choke point (wrapper bypass still caught)."
+  },
+  "process": {
+    "order": 2,
+    "description": "Process creation; every non-WoW64 child is injected with the same monitor (child-following)."
+  },
+  "memory": {
+    "order": 3,
+    "description": "Alloc/protect/read/write/map/unmap + Ex variants (no Ex bypass). Unmap = hollowing gut; cross-read = secret theft; cross-write = injection."
+  },
+  "injection": {
+    "order": 4,
+    "description": "Thread start/resume/suspend, APC queueing, context get/set -- every injection finisher incl. the ones Sysmon cannot see (APC, context hijack)."
+  },
+  "registry": {
+    "order": 5,
+    "description": "Registry value writes (persistence)."
+  },
+  "loader": {
+    "order": 6,
+    "description": "Module loads that bypass the kernel32 LoadLibrary wrapper. Manual mapping never calls this; covered by the memory hooks instead."
+  },
+  "timing": {
+    "order": 7,
+    "description": "Sleeps, time-source polling, and timer-APC execution -- anti-sandbox checks and sleep-obfuscation (Ekko/Foliage)."
+  },
+  "crypto": {
+    "order": 8,
+    "description": "Bulk encryption/hashing (ransomware-style bursts; hashing itself is noise-filtered signature-side)."
+  },
+  "token": {
+    "order": 9,
+    "description": "Privilege escalation / token theft (SeDebug/SeImpersonate enables; cross-process token open + duplicate)."
+  },
+  "evasion": {
+    "order": 10,
+    "description": "Anti-debugging (ThreadHideFromDebugger, debug-class tampering) and NTFS transactions (doppelganging). Memory events also carry base addresses and flag writes/protects inside ntdll/amsi (unhooking, ETW-AMSI blinding); process events decode PPID spoofing."
+  }
+}

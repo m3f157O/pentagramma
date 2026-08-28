@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Rules &middot; PENTAGRAMMA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="css/style.css?v=21" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PENTAGRAMMA</div>
+    <nav>
+      <a href="index.html">Dashboard</a>
+      <a href="live.html">Live Trace</a>
+      <a href="traces.html">Traces</a>
+      <a href="reports.html">Reports</a>
+      <a href="rules.html" class="active">Rules</a>
+      <a href="harness.html">Injection Harness</a>
+      <a href="architecture.html">Architecture</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Detection rule catalog</h1>
+    <p class="muted small" id="catalog-intro">Loading&hellip;</p>
+
+    <div class="grid cols-4" id="rules-cards" style="margin-top:12px"></div>
+
+    <nav id="rules-nav" class="section-nav" aria-label="Rule family selector" style="margin-top:16px"></nav>
+
+    <!-- Sigma -->
+    <details class="section" id="fam-sigma" open>
+      <summary>Sigma rules (<span id="sigma-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="controls">
+          <input type="text" id="sigma-search" placeholder="Search title / id / tag&hellip;" style="min-width:260px" />
+          <select id="sigma-level">
+            <option value="">any level</option>
+            <option value="critical">critical</option>
+            <option value="high">high</option>
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+            <option value="informational">informational</option>
+          </select>
+          <span class="small muted" id="sigma-shown"></span>
+        </div>
+        <table>
+          <thead><tr><th>Level</th><th>Title</th><th>Log source</th><th>ATT&amp;CK</th></tr></thead>
+          <tbody id="sigma-body"><tr><td colspan="4" class="empty-state">Loading&hellip;</td></tr></tbody>
+        </table>
+        <div style="margin-top:8px"><button id="sigma-more" class="secondary hidden">Show more</button></div>
+      </div>
+    </details>
+
+    <!-- YARA -->
+    <details class="section" id="fam-yara">
+      <summary>YARA rules (<span id="yara-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted" id="yara-targets" style="margin-bottom:8px"></div>
+        <div id="yara-load-errors" class="small error-text" style="margin-bottom:8px"></div>
+        <div style="display:flex; gap:8px; align-items:center; margin-bottom:8px; flex-wrap:wrap">
+          <input type="text" id="yara-search" placeholder="Search rule name / description / file&hellip;" style="min-width:260px" />
+          <span class="small muted" id="yara-shown"></span>
+        </div>
+        <table>
+          <thead><tr><th>Rule</th><th>Description</th><th>File</th></tr></thead>
+          <tbody id="yara-body"></tbody>
+        </table>
+        <div style="margin-top:8px"><button id="yara-more" class="secondary hidden">Show more</button></div>
+      </div>
+    </details>
+
+    <!-- Heuristics -->
+    <details class="section" id="fam-heuristics">
+      <summary>Heuristics (<span id="heuristics-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted" style="margin-bottom:8px">Hardcoded detectors in orchestrator/heuristics.py &mdash; event selection, LOLBin patterns, burst/sequence detectors and triage annotations.</div>
+        <div id="heuristics-body"></div>
+      </div>
+    </details>
+
+    <!-- Behavioral signatures -->
+    <details class="section" id="fam-behavioral">
+      <summary>Behavioral signatures (<span id="behavioral-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted" style="margin-bottom:8px">Sequence/presence signatures in orchestrator/behavioral_signatures.py over the MinHook API-trace stream (argument-level Nt* calls captured from the sample and its children) &mdash; catches injection chains that never touch a Sysmon-visible wrapper.</div>
+        <div id="behavioral-body"></div>
+      </div>
+    </details>
+
+    <!-- CAPE community signatures -->
+    <details class="section" id="fam-cape">
+      <summary>CAPE community signatures (<span id="cape-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted" style="margin-bottom:8px">Vendored CAPE community corpus (<code>cape_signatures/</code>) replayed over the API-trace stream by <code>orchestrator/cape_engine.py</code> &mdash; community-curated behavioral heuristics with per-signature severity and TTP tags. Verdict scoring: <strong id="cape-score-state">?</strong> (config <code>cape_signatures.score</code>).</div>
+        <div id="cape-load-errors" class="small error-text" style="margin-bottom:8px"></div>
+        <div class="controls">
+          <input type="text" id="cape-search" placeholder="Search name / description / TTP&hellip;" style="min-width:260px" />
+          <select id="cape-level">
+            <option value="">any severity</option>
+            <option value="high">high</option>
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+          </select>
+          <span class="small muted" id="cape-shown"></span>
+        </div>
+        <table>
+          <thead><tr><th>Severity</th><th>Signature</th><th>Kind</th><th>TTPs</th></tr></thead>
+          <tbody id="cape-body"></tbody>
+        </table>
+        <div style="margin-top:8px"><button id="cape-more" class="secondary hidden">Show more</button></div>
+      </div>
+    </details>
+
+    <!-- Static signals -->
+    <details class="section" id="fam-static">
+      <summary>Static-analysis signals (<span id="static-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted" style="margin-bottom:8px">Signals computed from the binary without executing it &mdash; feed the verdict score.</div>
+        <div id="static-body"></div>
+      </div>
+    </details>
+  </main>
+
+  <script src="js/api.js?v=10"></script>
+  <script src="js/rules.js?v=8"></script>
+</body>
+</html>

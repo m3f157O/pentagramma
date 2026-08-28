@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>PENTAGRAMMA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="css/style.css?v=21" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PENTAGRAMMA</div>
+    <nav>
+      <a href="index.html" class="active">Dashboard</a>
+      <a href="live.html">Live Trace</a>
+      <a href="traces.html">Traces</a>
+      <a href="reports.html">Reports</a>
+      <a href="rules.html">Rules</a>
+      <a href="harness.html">Injection Harness</a>
+      <a href="architecture.html">Architecture</a>
+    </nav>
+    <div style="margin-left:auto">
+      <span class="small muted">orchestrator</span>
+      <span id="health-badge" class="badge neutral">checking&hellip;</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-title">Analysis VM</div>
+        <div id="vm-card-body">
+          <div class="muted small">Loading&hellip;</div>
+        </div>
+        <div class="controls" style="margin-top:12px">
+          <button id="btn-ensure-snapshot" class="secondary">Ensure snapshot</button>
+          <button id="btn-restore-snapshot" class="secondary">Restore snapshot</button>
+          <span id="vm-action-status" class="small muted"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Current Job</div>
+        <div id="job-card-body">
+          <div class="muted small">Loading&hellip;</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="queue-card" class="card" style="margin-top:16px; display:none">
+      <div class="card-title">Queue</div>
+      <div id="queue-card-body"></div>
+    </div>
+
+    <div id="submit-panel" class="card" style="margin-top:16px">
+      <div class="card-title">Submit sample</div>
+      <form id="submit-form" class="controls" style="margin-top:8px">
+        <label class="small"><input type="radio" name="submit-mode" id="mode-file" value="file" checked /> File</label>
+        <label class="small"><input type="radio" name="submit-mode" id="mode-url" value="url" /> URL</label>
+
+        <input type="file" id="sample-file" />
+        <input type="text" id="submit-url" placeholder="https://example.com/..." style="min-width:260px" class="hidden" />
+
+        <select id="sample-type" title="Sample type override (default: auto-detect)">
+          <option value="">auto-detect</option>
+          <option value="exe">exe</option>
+          <option value="dll">dll</option>
+          <option value="js">js</option>
+          <option value="vbs">vbs</option>
+          <option value="ps1">ps1</option>
+          <option value="bat">bat</option>
+          <option value="zip">zip</option>
+        </select>
+
+        <select id="url-mode" class="hidden" title="How to handle the URL">
+          <option value="browse">browse (open in guest browser)</option>
+          <option value="fetch">fetch (curl download)</option>
+        </select>
+
+        <input type="text" id="dll-entry-point" placeholder="DLL export (if ambiguous)" class="hidden" style="width:180px" />
+        <input type="text" id="archive-entry" placeholder="archive entry to run" class="hidden" style="width:160px" />
+        <input type="text" id="archive-password" placeholder="archive password" class="hidden" style="width:140px" />
+
+        <input type="text" id="arguments" placeholder="arguments (optional)" />
+        <input type="number" id="timeout" placeholder="timeout s" style="width:90px" />
+        <button type="submit">Run in sandbox</button>
+      </form>
+      <div id="submit-status" class="small muted"></div>
+    </div>
+
+    <h2>Recent analyses</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Sample</th>
+          <th>Status</th>
+          <th>Verdict</th>
+          <th>Alerts</th>
+          <th>EID25</th>
+          <th>Runtime</th>
+        </tr>
+      </thead>
+      <tbody id="recent-reports-body">
+        <tr><td colspan="7" class="empty-state">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+    <div class="small" style="margin-top:8px"><a href="reports.html">View full history &rarr;</a></div>
+  </main>
+
+  <script src="js/api.js?v=10"></script>
+  <script src="js/poll.js?v=5"></script>
+  <script src="js/dashboard.js?v=5"></script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+title: Test Sysmon Fallback No Static EventID
+id: 33333333-3333-3333-3333-333333333333
+status: test
+logsource:
+    product: windows
+    service: sysmon
+detection:
+    selection:
+        Image|contains: 'FallbackMarker'
+    condition: selection
+level: high

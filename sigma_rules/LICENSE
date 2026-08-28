@@ -1,0 +1,7 @@
+This directory contains rules vendored from SigmaHQ/sigma
+(https://github.com/SigmaHQ/sigma), licensed under the Detection Rule
+License (DRL) 1.1: https://github.com/SigmaHQ/sigma/blob/master/LICENSE
+
+Not this project's own license -- these rules retain their original
+license and attribution. See .source_commit for the exact upstream commit
+these were vendored from.

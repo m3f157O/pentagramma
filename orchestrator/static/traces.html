@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Traces &middot; PENTAGRAMMA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="css/style.css?v=21" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PENTAGRAMMA</div>
+    <nav>
+      <a href="index.html">Dashboard</a>
+      <a href="live.html">Live Trace</a>
+      <a href="traces.html" class="active">Traces</a>
+      <a href="reports.html">Reports</a>
+      <a href="rules.html">Rules</a>
+      <a href="harness.html">Injection Harness</a>
+      <a href="architecture.html">Architecture</a>
+    </nav>
+  </header>
+
+  <main>
+    <h1>Archived local traces</h1>
+    <p class="small muted">Ended Live Trace sessions. Click a row to browse its captured API calls.</p>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Started</th><th>Target</th><th>Args</th><th>Arch</th><th>Status</th><th>Exit</th><th>Events</th><th>Size</th>
+        </tr>
+      </thead>
+      <tbody id="traces-body">
+        <tr><td colspan="8" class="empty-state">Loading&hellip;</td></tr>
+      </tbody>
+    </table>
+
+    <details class="section" id="trace-detail" style="margin-top:16px" open>
+      <summary>Trace &mdash; <span id="trace-detail-id" class="mono small">(select a session above)</span></summary>
+      <div class="section-body">
+        <div class="controls">
+          <input type="text" id="trace-q" placeholder="filter (substring)&hellip;" style="min-width:240px" />
+          <button id="btn-td-prev" class="secondary">&#9664; prev</button>
+          <button id="btn-td-next" class="secondary">next &#9654;</button>
+          <span id="trace-detail-label" class="small muted"></span>
+        </div>
+        <table>
+          <thead><tr><th>Time</th><th>API</th><th>Category</th><th>PID</th><th>TID</th><th>Arguments</th></tr></thead>
+          <tbody id="trace-detail-body">
+            <tr><td colspan="6" class="empty-state">Select a session above.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+  </main>
+
+  <script src="js/api.js?v=10"></script>
+  <script src="js/traces.js?v=1"></script>
+</body>
+</html>

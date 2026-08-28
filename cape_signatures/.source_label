@@ -1,0 +1,9 @@
+source: https://github.com/CAPESandbox/community (modules/signatures/{windows,all})
+ref: master @ 2026-07-27 (fetched via https://github.com/CAPESandbox/community/archive/refs/heads/master.zip)
+count: 458 signature modules (366 windows + 92 cross-platform)
+license: no LICENSE file upstream; the repo derives from CAPEv2/Cuckoo (GPL-3.0 family).
+         Vendored for internal detection use; do not redistribute.
+notes: Run against our apitrace stream via orchestrator/cape_compat.py +
+       orchestrator/cape_engine.py (NOT a full CAPE deployment). Coverage is
+       inherently partial: our hookset is Nt-level, so Win32-only filters and
+       unhooked API families (network/services/com) cannot match.
