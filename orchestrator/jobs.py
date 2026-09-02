@@ -37,6 +37,29 @@ MAX_RETAINED_JOBS = 200
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 HARNESS_SCRIPT = PROJECT_ROOT / "scripts" / "run_injection_harness.ps1"
 HARNESS_TIMEOUT_SECONDS = 900
+GUARDIAN_DIR = PROJECT_ROOT / "guardian"
+GUARDIAN_BUILD_SCRIPT = GUARDIAN_DIR / "build_guardian.ps1"
+GUARDIAN_SIGN_SCRIPT = GUARDIAN_DIR / "make_test_cert.ps1"
+GUARDIAN_SPIKE_SCRIPT = GUARDIAN_DIR / "guardian_spike.ps1"
+GUARDIAN_A1_SCRIPT = GUARDIAN_DIR / "guardian_a1_test.ps1"
+GUARDIAN_PROVISION_SCRIPT = GUARDIAN_DIR / "install_guardian.ps1"
+
+# POST /api/guardian/run actions -> (script, args, timeout_s). "build" is
+# special-cased (build + sign, two scripts). Spike stages are the one-time
+# A0 feasibility flow; load/test/cleanup are the repeatable A1a functional
+# flow. All claim the single-flight slot: they drive the same one VM.
+GUARDIAN_ACTIONS = {
+    "build": None,  # special-cased
+    "spike-inspect": (GUARDIAN_SPIKE_SCRIPT, ["-Stage", "inspect"], 300),
+    "spike-enable": (GUARDIAN_SPIKE_SCRIPT, ["-Stage", "enable"], 600),
+    "spike-load": (GUARDIAN_SPIKE_SCRIPT, ["-Stage", "load"], 300),
+    "spike-diag": (GUARDIAN_SPIKE_SCRIPT, ["-Stage", "diag"], 300),
+    "spike-cleanup": (GUARDIAN_SPIKE_SCRIPT, ["-Stage", "cleanup"], 300),
+    "load": (GUARDIAN_A1_SCRIPT, ["-Stage", "load"], 300),
+    "test": (GUARDIAN_A1_SCRIPT, ["-Stage", "test"], 600),
+    "cleanup": (GUARDIAN_A1_SCRIPT, ["-Stage", "cleanup"], 300),
+    "provision": (GUARDIAN_PROVISION_SCRIPT, [], 1800),
+}
 
 _lock = threading.Lock()
 _jobs: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
@@ -420,6 +443,78 @@ def _run_harness_job(
             finished_at=_now_iso(),
             error=f"Timed out after {HARNESS_TIMEOUT_SECONDS}s",
         )
+    except Exception as exc:
+        update_job(job_id, status="failed", finished_at=_now_iso(), error=str(exc))
+    finally:
+        release()
+
+
+# ---------------------------------------------------------------------------
+# Guardian driver job (wraps guardian\*.ps1 stages)
+# ---------------------------------------------------------------------------
+
+def submit_guardian_job(action: str) -> Optional[Dict[str, Any]]:
+    """Claim the single-flight slot and run a guardian driver stage
+    (see GUARDIAN_ACTIONS) in a background thread.
+
+    The scripts drive the analysis VM via PowerShell Direct, so this shares
+    the single-flight slot with analysis/harness jobs. Progress is coarse
+    (queued/running/completed/failed); the script's stdout tail is stored on
+    the job record as "output". For action="test" the report_status field
+    carries the check verdict: "all_pass" | "checks_failed".
+    """
+    if action not in GUARDIAN_ACTIONS:
+        raise ValueError(f"unknown guardian action: {action}")
+    job_id = str(uuid.uuid4())
+    if not try_acquire(job_id):
+        return None
+
+    job = _create_job_record(job_id, "guardian", f"guardian:{action}", "", None)
+
+    thread = threading.Thread(target=_run_guardian_job, args=(job_id, action), daemon=True)
+    thread.start()
+    return job
+
+
+def _run_ps_stage(job_id: str, args: List[str], timeout: int) -> "tuple[int, str]":
+    """Run one PowerShell stage; return (returncode, combined output tail)."""
+    proc = subprocess.run(
+        ["powershell.exe", "-ExecutionPolicy", "Bypass", "-File"] + args,
+        cwd=str(PROJECT_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+    return proc.returncode, ((proc.stdout or "") + (proc.stderr or ""))[-4000:]
+
+
+def _run_guardian_job(job_id: str, action: str) -> None:
+    update_job(job_id, status="running", started_at=_now_iso())
+    try:
+        if action == "build":
+            append_step(job_id, "build_guardian_ps1")
+            rc, out = _run_ps_stage(job_id, [str(GUARDIAN_BUILD_SCRIPT)], 300)
+            if rc == 0:
+                append_step(job_id, "make_test_cert_ps1")
+                rc2, out2 = _run_ps_stage(job_id, [str(GUARDIAN_SIGN_SCRIPT), "-SignOnly"], 300)
+                out = out + "\n" + out2
+                rc = rc2
+        else:
+            script, extra_args, timeout = GUARDIAN_ACTIONS[action]
+            append_step(job_id, f"{script.stem} {' '.join(extra_args)}")
+            rc, out = _run_ps_stage(job_id, [str(script)] + extra_args, timeout)
+
+        fields: Dict[str, Any] = {"finished_at": _now_iso(), "output": out}
+        if rc != 0:
+            fields["status"] = "failed"
+            fields["error"] = out[-2000:] or f"guardian action '{action}' failed"
+        else:
+            fields["status"] = "completed"
+            if action == "test":
+                fields["report_status"] = "checks_failed" if "[FAIL]" in out else "all_pass"
+        update_job(job_id, **fields)
+    except subprocess.TimeoutExpired:
+        update_job(job_id, status="failed", finished_at=_now_iso(), error=f"guardian action '{action}' timed out")
     except Exception as exc:
         update_job(job_id, status="failed", finished_at=_now_iso(), error=str(exc))
     finally:

@@ -66,14 +66,16 @@ class SandboxExecutor:
     def _agent_dir_host(self) -> str:
         return self.config.paths.get("agent_dir", str(Path(__file__).resolve().parent.parent / "agent" / "windows"))
 
-    def _sources_str(self, include_apitrace: bool = False) -> str:
+    def _sources_str(self, include_apitrace: bool = False, include_guardian: bool = False) -> str:
         sources = list(self.telemetry_cfg.get("sources", ["sysmon"]))
         # apitrace is opt-in per-run (Track 3), not a static config entry --
         # only append it when this run actually started the collector, so a
         # non-traced run never asks telemetry_collector.py to look for a file
-        # that (by design) was never created.
+        # that (by design) was never created. Same contract for guardian.
         if include_apitrace and "apitrace" not in sources:
             sources.append("apitrace")
+        if include_guardian and "guardian" not in sources:
+            sources.append("guardian")
         return ",".join(sources)
 
     def _read_telemetry_events(self, path: Path) -> List[Dict[str, Any]]:
@@ -385,6 +387,16 @@ class SandboxExecutor:
         apitrace_guest_file = bt_cfg.get("guest_apitrace_file", "C:\\SandboxAgent\\apitrace.jsonl")
         apitrace_stop_file = bt_cfg.get("guest_stop_file", "C:\\SandboxAgent\\apitrace_stop.flag")
 
+        # SandboxGuard kernel guardian (protect/verify/place). Fails open:
+        # if the driver is absent in the guest, guardian_agent emits a
+        # GuardianUnavailable meta event and exits -- the run is unaffected.
+        g_cfg = self.config.guardian
+        guardian_enabled = g_cfg.get("enabled", False)
+        guardian_started = False
+        guardian_agent_pid = 0
+        guardian_guest_file = g_cfg.get("guest_output_file", "C:\\SandboxAgent\\guardian.jsonl")
+        guardian_stop_file = g_cfg.get("guest_stop_file", "C:\\SandboxAgent\\guardian_stop.flag")
+
         sec_cfg = self.config.sample_execution
         guest_destination_folder = sec_cfg.get("guest_destination_folder", "C:\\Sandbox")
 
@@ -506,6 +518,35 @@ class SandboxExecutor:
                 except Exception as exc:
                     apitrace_start_error = f"Failed to start API-trace collector: {exc}"
 
+            # 7d. Start the guardian agent before the sample runs (kernel
+            # protection + pre-entry injection placement). Target image = the
+            # launched executable's basename (launcher for script samples,
+            # else the sample itself); driver-side lineage follows children.
+            # Double-placement with the loader is harmless (LoadLibrary of
+            # the same DLL is refcounted; DllMain runs once).
+            guardian_start_error: Optional[str] = None
+            if guardian_enabled:
+                _step("guardian_start")
+                try:
+                    if launcher_path:
+                        target_image = launcher_path.replace("/", "\\").rsplit("\\", 1)[-1]
+                    else:
+                        target_image = destination_filename or sample_filename or ""
+                    g_result = self.hv.guardian_start(
+                        agent_dir=guest_agent_dir,
+                        output_file=guardian_guest_file,
+                        stop_file=guardian_stop_file,
+                        max_seconds=max(timeout + 60, 120),
+                        target_image=target_image if behavioral_tracing_enabled else "",
+                        dll_x64=bt_cfg.get("guest_dll_path", "") if behavioral_tracing_enabled else "",
+                        dll_x86=bt_cfg.get("guest_dll_path", "").replace("monitor_x64.dll", "monitor_x86.dll")
+                        if behavioral_tracing_enabled and bt_cfg.get("guest_dll_path") else "",
+                    )
+                    guardian_started = True
+                    guardian_agent_pid = g_result.get("AgentPid", 0)
+                except Exception as exc:
+                    guardian_start_error = f"Failed to start guardian agent: {exc}"
+
             # 8. Execute sample
             _step("execute_sample")
             execution_info = self.hv.execute_sample(
@@ -532,6 +573,10 @@ class SandboxExecutor:
                 execution_info["defender_readiness"] = defender_readiness
             if apitrace_start_error is not None:
                 execution_info["apitrace_start_error"] = apitrace_start_error
+            if guardian_start_error is not None:
+                execution_info["guardian_start_error"] = guardian_start_error
+            if guardian_enabled:
+                execution_info["guardian_requested"] = True
             if behavioral_tracing_enabled:
                 execution_info["behavioral_tracing_requested"] = True
 
@@ -551,6 +596,18 @@ class SandboxExecutor:
                     execution_info["apitrace_stop"] = at_stop
                 except Exception as exc:
                     execution_info["apitrace_stop_error"] = f"Failed to stop API-trace collector: {exc}"
+
+            # 8a-ii. Stop the guardian agent so guardian.jsonl is flushed and
+            # the driver is back to inert (CLEAR_ALL) before collect reads it.
+            if guardian_started:
+                _step("guardian_stop")
+                try:
+                    execution_info["guardian_stop"] = self.hv.guardian_stop(
+                        agent_pid=guardian_agent_pid,
+                        stop_file=guardian_stop_file,
+                    )
+                except Exception as exc:
+                    execution_info["guardian_stop_error"] = f"Failed to stop guardian agent: {exc}"
 
             # 8b. Copy any process memory dumps off the VM and rescan them
             # with the existing static-analysis YARA engine -- this is *why*
@@ -593,7 +650,7 @@ class SandboxExecutor:
             time.sleep(2)
             self.hv.telemetry_collect(
                 agent_dir=guest_agent_dir,
-                sources=self._sources_str(include_apitrace=apitrace_started),
+                sources=self._sources_str(include_apitrace=apitrace_started, include_guardian=guardian_started),
             )
             self.hv.copy_telemetry(
                 host_destination_path=str(host_telemetry_path),

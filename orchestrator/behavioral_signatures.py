@@ -43,6 +43,22 @@ APITRACE_PPID_SPOOF_EVENT_ID = 9214
 APITRACE_BLIND_SPOT_EVENT_ID = 9215
 APITRACE_SILENCE_EVENT_ID = 9216
 
+# SandboxGuard kernel guardian (agent/windows/guardian_agent.py drains the
+# driver ring; telemetry source "guardian"). 9400/9404 are informational
+# (unavailable / injection placed) and never alert; the rest map 1:1.
+GUARDIAN_SOURCE = "guardian"
+GUARDIAN_PROTECTED_ACCESS_EVENT_ID = 9401
+GUARDIAN_PROTECTED_REGISTRY_EVENT_ID = 9402
+GUARDIAN_MODULE_REMAP_EVENT_ID = 9403
+GUARDIAN_INJECTION_FAILED_EVENT_ID = 9405
+
+_GUARDIAN_ALERT_SPECS = {
+    GUARDIAN_PROTECTED_ACCESS_EVENT_ID: "GuardianProtectedAccess",
+    GUARDIAN_PROTECTED_REGISTRY_EVENT_ID: "GuardianProtectedRegistry",
+    GUARDIAN_MODULE_REMAP_EVENT_ID: "GuardianModuleRemap",
+    GUARDIAN_INJECTION_FAILED_EVENT_ID: "GuardianInjectionFailed",
+}
+
 # APIs treated as allocation/map events (base + Ex variants, so malware
 # using the newer entry points can't slip past the memory signatures).
 _ALLOC_MAP_APIS = ("NtAllocateVirtualMemory", "NtMapViewOfSection", "NtAllocateVirtualMemoryEx", "NtMapViewOfSectionEx")
@@ -1410,18 +1426,139 @@ def describe_signatures() -> List[Dict[str, Any]]:
             ),
             "detail": ["__event_cap_reached__"],
         },
+        {
+            "id": "behavioral.guardian-protected-access",
+            "family": detectors.FAMILY_BEHAVIORAL,
+            "name": "Guardian: access to protected process denied",
+            "severity": "high",
+            "kind": "kernel",
+            "mitre": ["T1562.001"],
+            "description": (
+                "SandboxGuard's Ob callback stripped dangerous access rights "
+                "(TERMINATE/VM_WRITE/VM_OPERATION/CREATE_THREAD/SET_INFORMATION) "
+                "from a handle open targeting a protected telemetry process "
+                "(Sysmon, guardian agent)."
+            ),
+            "detail": ["SandboxGuard.sys", "ObRegisterCallbacks"],
+        },
+        {
+            "id": "behavioral.guardian-protected-registry",
+            "family": detectors.FAMILY_BEHAVIORAL,
+            "name": "Guardian: protected registry key write denied",
+            "severity": "high",
+            "kind": "kernel",
+            "mitre": ["T1562.001"],
+            "description": (
+                "SandboxGuard's Cm callback denied a write/delete on a "
+                "protected key (Sysmon service/config, AMSI providers, "
+                "Defender exclusions, IFEO)."
+            ),
+            "detail": ["SandboxGuard.sys", "CmRegisterCallbackEx"],
+        },
+        {
+            "id": "behavioral.guardian-module-remap",
+            "family": detectors.FAMILY_BEHAVIORAL,
+            "name": "Guardian: module remap detected",
+            "severity": "high",
+            "kind": "kernel",
+            "mitre": ["T1562.001"],
+            "description": (
+                "ntdll/kernel32/amsi mapped twice into the same process -- "
+                "the copy-and-remap unhooking primitive, unblindable from "
+                "user mode."
+            ),
+            "detail": ["SandboxGuard.sys", "PsSetLoadImageNotifyRoutine"],
+        },
+        {
+            "id": "behavioral.guardian-injection-failed",
+            "family": detectors.FAMILY_BEHAVIORAL,
+            "name": "Guardian: injection placement failed",
+            "severity": "medium",
+            "kind": "kernel",
+            "mitre": [],
+            "description": (
+                "The driver failed to place the monitor into a targeted "
+                "process (NTSTATUS in the event data). Transparency signal "
+                "for placement coverage gaps (e.g. WoW64 targets before the "
+                "x86 loader address is available)."
+            ),
+            "detail": ["SandboxGuard.sys", "APC placement"],
+        },
     ]
 
 
+# ---------------------------------------------------------------------------
+# SandboxGuard guardian events (kernel protection + placement feedback)
+# ---------------------------------------------------------------------------
+
+
+def _guardian_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [e for e in events if e.get("source") == GUARDIAN_SOURCE]
+
+
+def _guardian_detail(event_id: Optional[int], data: Dict[str, Any]) -> str:
+    pid = data.get("ProcessId") or 0
+    target = data.get("TargetProcessId") or 0
+    text = data.get("Text") or ""
+    value = data.get("Value") or 0
+    if event_id == GUARDIAN_PROTECTED_ACCESS_EVENT_ID:
+        return f"Access to protected process {target} denied for pid {pid} (stripped access mask 0x{value:x})"
+    if event_id == GUARDIAN_PROTECTED_REGISTRY_EVENT_ID:
+        return f"Registry write/delete on protected key denied for pid {pid}: {text}"
+    if event_id == GUARDIAN_MODULE_REMAP_EVENT_ID:
+        return f"Module mapped twice into pid {target} (possible ntdll/amsi remap): {text}"
+    if event_id == GUARDIAN_INJECTION_FAILED_EVENT_ID:
+        return f"Guardian placement APC into pid {target} failed (NTSTATUS 0x{value & 0xFFFFFFFF:08x})"
+    return "Guardian driver event"
+
+
+def _detect_guardian_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Pass guardian driver events through as behavioral alerts.
+
+    The kernel callback IS the detection (a denial/remap only exists because
+    the driver already classified it), so this is a 1:1 mapping, not a
+    correlation. Works with or without an apitrace stream.
+    """
+    alerts: List[Dict[str, Any]] = []
+    for ev in _guardian_events(events):
+        event_type = _GUARDIAN_ALERT_SPECS.get(ev.get("event_id"))
+        if event_type is None:
+            continue
+        data = ev.get("data") or {}
+        ts = ev.get("timestamp") or ""
+        alert_data: Dict[str, Any] = {
+            "UtcTime": ts,
+            "ProcessId": data.get("ProcessId") or 0,
+            "Type": _guardian_detail(ev.get("event_id"), data),
+            "Evidence": [data.get("Text") or ""],
+        }
+        if data.get("TargetProcessId"):
+            alert_data["TargetProcessId"] = data["TargetProcessId"]
+        alerts.append(
+            {
+                "source": GUARDIAN_SOURCE,
+                "provider_name": "BehavioralSignatures",
+                "event_id": ev.get("event_id"),
+                "event_type": event_type,
+                "timestamp": ts,
+                "data": alert_data,
+            }
+        )
+    return alerts
+
+
 def detect_behavioral_signatures(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Main entry point: telemetry events -> apitrace-derived alerts.
+    """Main entry point: telemetry events -> apitrace/guardian-derived alerts.
 
     Pure function over the report event list, so offline replay picks it up
     automatically via reporting.compute_detection().
     """
+    # Guardian alerts don't depend on the apitrace stream at all -- compute
+    # them before the apitrace early-return.
+    guardian_alerts = _detect_guardian_events(events)
     apitrace = _apitrace_events(events)
     if not apitrace:
-        return []
+        return guardian_alerts
 
     children = _child_pids_by_actor(apitrace)
     chain_alerts, covered = _detect_injection_chains(apitrace)
@@ -1447,5 +1584,5 @@ def detect_behavioral_signatures(events: List[Dict[str, Any]]) -> List[Dict[str,
         chain_alerts + write_alerts + exec_alerts + thread_alerts
         + load_alerts + timing_alerts + crypto_alerts + token_alerts
         + read_alerts + debug_alerts + tamper_alerts + tx_alerts + ppid_alerts
-        + trunc_alerts + blindspot_alerts + silence_alerts
+        + trunc_alerts + blindspot_alerts + silence_alerts + guardian_alerts
     )

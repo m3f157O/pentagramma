@@ -43,6 +43,8 @@ class HyperVManager:
             "NetworkCapture-Stop",
             "Apitrace-Start",
             "Apitrace-Stop",
+            "Guardian-Start",
+            "Guardian-Stop",
             "Copy-NetworkCapture",
             "Copy-ProcessDumps",
             "Copy-DroppedFiles",
@@ -202,6 +204,40 @@ class HyperVManager:
         return self._run_ps(
             "Apitrace-Stop",
             CollectorPid=collector_pid,
+            StopFile=stop_file,
+            WaitSeconds=wait_seconds,
+        )
+
+    def guardian_start(
+        self,
+        agent_dir: str = "C:\\SandboxAgent",
+        output_file: str = "C:\\SandboxAgent\\guardian.jsonl",
+        stop_file: str = "C:\\SandboxAgent\\guardian_stop.flag",
+        max_seconds: int = 900,
+        target_image: str = "",
+        dll_x64: str = "",
+        dll_x86: str = "",
+    ) -> Dict[str, Any]:
+        return self._run_ps(
+            "Guardian-Start",
+            AgentDir=agent_dir,
+            OutputFile=output_file,
+            StopFile=stop_file,
+            MaxSeconds=max_seconds,
+            TargetImage=target_image,
+            DllX64=dll_x64,
+            DllX86=dll_x86,
+        )
+
+    def guardian_stop(
+        self,
+        agent_pid: int = 0,
+        stop_file: str = "C:\\SandboxAgent\\guardian_stop.flag",
+        wait_seconds: int = 8,
+    ) -> Dict[str, Any]:
+        return self._run_ps(
+            "Guardian-Stop",
+            AgentPid=agent_pid,
             StopFile=stop_file,
             WaitSeconds=wait_seconds,
         )

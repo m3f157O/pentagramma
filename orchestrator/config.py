@@ -91,6 +91,10 @@ class SandboxConfig:
     def behavioral_tracing(self) -> Dict[str, Any]:
         return self._data.get("behavioral_tracing", {})
 
+    @property
+    def guardian(self) -> Dict[str, Any]:
+        return self._data.get("guardian", {})
+
 
 def get_config() -> SandboxConfig:
     env_path = os.environ.get("SANDBOX_CONFIG")

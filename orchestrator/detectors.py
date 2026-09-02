@@ -112,6 +112,11 @@ _APITRACE_SIGNATURE_SEVERITY = {
     "ApitracePpidSpoof": "high",
     "ApitraceBlindSpot": "high",
     "ApitraceSilence": "medium",
+    # SandboxGuard kernel guardian (source "guardian", EIDs 9401-9405)
+    "GuardianProtectedAccess": "high",
+    "GuardianProtectedRegistry": "high",
+    "GuardianModuleRemap": "high",
+    "GuardianInjectionFailed": "medium",
 }
 
 # Truncation is transparency-only; do not score it.

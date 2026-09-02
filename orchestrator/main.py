@@ -895,6 +895,34 @@ def run_harness(
     return job
 
 
+@app.post("/api/guardian/run", status_code=202)
+def run_guardian(action: str) -> Dict[str, Any]:
+    """Run a SandboxGuard driver stage against the analysis VM
+    (guardian\\*.ps1 via PowerShell Direct). The orchestrator must run
+    ELEVATED for VM stages (Hyper-V PSDirect).
+
+    Actions: build (compile+sign the driver, host-side), load / test /
+    cleanup (the repeatable A1a functional flow), and the one-time A0 spike
+    stages spike-inspect / spike-enable / spike-load / spike-diag /
+    spike-cleanup.
+
+    Returns immediately with a job record; poll GET /api/jobs/{job_id}.
+    For action=test the job's report_status is "all_pass" | "checks_failed"
+    and the script output tail is on the record's "output" field. Shares the
+    single-flight VM slot with /api/jobs and /api/harness/run.
+    """
+    try:
+        job = jobs.submit_guardian_job(action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if job is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"detail": "A job is already running", "active_job_id": jobs.get_active_job_id()},
+        )
+    return job
+
+
 def _resolve_capture(report: Dict[str, Any]) -> Dict[str, Any]:
     """Check whether a report's network_capture actually has a usable file
     on disk. A report simply lacking a capture is a normal, expected state

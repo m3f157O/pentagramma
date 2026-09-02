@@ -1091,6 +1091,142 @@ function Invoke-ApitraceStop {
     return Invoke-Command @invokeArgs
 }
 
+function Invoke-GuardianStart {
+    <#
+    .SYNOPSIS
+        Start guardian_agent.py as a DETACHED background process in the
+        guest, before the sample launches. Mirrors Invoke-ApitraceStart: the
+        agent is long-lived (drains the SandboxGuard ring), so it is launched
+        via Start-Process and returns its PID for Guardian-Stop to target.
+        Fails open: if the driver is absent the agent emits a
+        GuardianUnavailable meta event and exits 0.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VMName,
+
+        [Parameter(Mandatory = $false)]
+        [string]$AgentDir = "C:\SandboxAgent",
+
+        [Parameter(Mandatory = $false)]
+        [string]$OutputFile = "C:\SandboxAgent\guardian.jsonl",
+
+        [Parameter(Mandatory = $false)]
+        [string]$StopFile = "C:\SandboxAgent\guardian_stop.flag",
+
+        [Parameter(Mandatory = $false)]
+        [int]$MaxSeconds = 900,
+
+        [Parameter(Mandatory = $false)]
+        [string]$TargetImage = "",
+
+        [Parameter(Mandatory = $false)]
+        [string]$DllX64 = "",
+
+        [Parameter(Mandatory = $false)]
+        [string]$DllX86 = "",
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialUsername,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialPassword
+    )
+
+    Assert-VMExists -VMName $VMName | Out-Null
+
+    $scriptBlock = {
+        param($agentDir, $outputFile, $stopFile, $maxSeconds, $targetImage, $dllX64, $dllX86)
+        $python = Join-Path $agentDir ".venv\Scripts\python.exe"
+        if (-not (Test-Path $python)) {
+            $python = 'C:\Python311\python.exe'
+            if (-not (Test-Path $python)) {
+                $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
+                if (-not $python) { throw "Python not found in VM" }
+            }
+        }
+        $agent = Join-Path $agentDir "guardian_agent.py"
+        foreach ($stale in @($outputFile, $stopFile)) {
+            if (Test-Path $stale) { Remove-Item -Path $stale -Force -ErrorAction SilentlyContinue }
+        }
+        $argList = @($agent, '--out', $outputFile, '--stop-file', $stopFile, '--max-seconds', $maxSeconds, '--quiet')
+        if ($targetImage) { $argList += @('--target-image', $targetImage) }
+        if ($dllX64) { $argList += @('--dll-x64', $dllX64) }
+        if ($dllX86) { $argList += @('--dll-x86', $dllX86) }
+        $proc = Start-Process -FilePath $python -ArgumentList $argList -WindowStyle Hidden -PassThru
+        Start-Sleep -Milliseconds 600
+        return @{ Started = $true; AgentPid = $proc.Id; OutputFile = $outputFile }
+    }
+
+    $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
+    $invokeArgs = @{
+        VMName       = $VMName
+        ScriptBlock  = $scriptBlock
+        ArgumentList = $AgentDir, $OutputFile, $StopFile, $MaxSeconds, $TargetImage, $DllX64, $DllX86
+    }
+    if ($cred) { $invokeArgs['Credential'] = $cred }
+    return Invoke-Command @invokeArgs
+}
+
+function Invoke-GuardianStop {
+    <#
+    .SYNOPSIS
+        Stop the guardian agent (stop-file -> graceful CLEAR_ALL + flush,
+        force-kill fallback). Must run BEFORE telemetry_collect reads
+        guardian.jsonl (mirrors Invoke-ApitraceStop's contract).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VMName,
+
+        [Parameter(Mandatory = $false)]
+        [int]$AgentPid = 0,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StopFile = "C:\SandboxAgent\guardian_stop.flag",
+
+        [Parameter(Mandatory = $false)]
+        [int]$WaitSeconds = 8,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialUsername,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialPassword
+    )
+
+    Assert-VMExists -VMName $VMName | Out-Null
+
+    $scriptBlock = {
+        param($agentPid, $stopFile, $waitSeconds)
+        New-Item -ItemType File -Path $stopFile -Force -ErrorAction SilentlyContinue | Out-Null
+        $exitedGracefully = $false
+        if ($agentPid -gt 0) {
+            $deadline = [System.Diagnostics.Stopwatch]::StartNew()
+            while ($deadline.Elapsed.TotalSeconds -lt $waitSeconds) {
+                $p = Get-Process -Id $agentPid -ErrorAction SilentlyContinue
+                if (-not $p) { $exitedGracefully = $true; break }
+                Start-Sleep -Milliseconds 200
+            }
+            if (-not $exitedGracefully) {
+                try { Stop-Process -Id $agentPid -Force -ErrorAction SilentlyContinue } catch {}
+            }
+        }
+        return @{ Stopped = $true; ExitedGracefully = $exitedGracefully }
+    }
+
+    $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
+    $invokeArgs = @{
+        VMName       = $VMName
+        ScriptBlock  = $scriptBlock
+        ArgumentList = $AgentPid, $StopFile, $WaitSeconds
+    }
+    if ($cred) { $invokeArgs['Credential'] = $cred }
+    return Invoke-Command @invokeArgs
+}
+
 function Copy-NetworkCaptureFromVM {
     [CmdletBinding()]
     param(
@@ -1553,11 +1689,23 @@ function Recapture-SandboxSnapshot {
     $stale = Get-VMSnapshot -VMName $VMName -Name $temp -ErrorAction SilentlyContinue
     if ($stale) { Remove-VMSnapshot -VMName $VMName -Name $temp; Start-Sleep -Seconds 3 }
 
-    # Create + verify the replacement BEFORE touching the old one.
-    Checkpoint-VM -Name $VMName -SnapshotName $temp
-    $new = Get-VMSnapshot -VMName $VMName -Name $temp -ErrorAction SilentlyContinue
+    # Create + verify the replacement BEFORE touching the old one. Surface
+    # the real Checkpoint-VM error instead of swallowing it (the previous
+    # "if (-not $new)" path reported nothing actionable). Checkpoint-VM can
+    # return before the snapshot is queryable -- poll for visibility.
+    try {
+        Checkpoint-VM -Name $VMName -SnapshotName $temp -ErrorAction Stop
+    } catch {
+        throw "Checkpoint-VM failed for replacement '$temp': $($_.Exception.Message)"
+    }
+    $new = $null
+    $visTimer = [Diagnostics.Stopwatch]::StartNew()
+    while (-not $new -and $visTimer.Elapsed.TotalSeconds -lt 120) {
+        Start-Sleep -Seconds 3
+        $new = Get-VMSnapshot -VMName $VMName -Name $temp -ErrorAction SilentlyContinue
+    }
     if (-not $new) {
-        throw "Failed to create replacement checkpoint; original '$SnapshotName' left intact."
+        throw "Checkpoint-VM returned but snapshot '$temp' never became visible; original '$SnapshotName' left intact."
     }
 
     Remove-VMSnapshot -VMName $VMName -Name $SnapshotName
@@ -1596,6 +1744,8 @@ if ($args.Count -gt 0) {
         "NetworkCapture-Stop"     { Invoke-NetworkCaptureStop @remainingArgs | ConvertTo-Json }
         "Apitrace-Start"          { Invoke-ApitraceStart @remainingArgs | ConvertTo-Json }
         "Apitrace-Stop"           { Invoke-ApitraceStop @remainingArgs | ConvertTo-Json }
+        "Guardian-Start"          { Invoke-GuardianStart @remainingArgs | ConvertTo-Json }
+        "Guardian-Stop"           { Invoke-GuardianStop @remainingArgs | ConvertTo-Json }
         "Copy-NetworkCapture"     { Copy-NetworkCaptureFromVM @remainingArgs | ConvertTo-Json }
         "Get-Thumbnail"           { Get-SandboxVMThumbnail @remainingArgs | ConvertTo-Json }
         "Copy-ProcessDumps"       { Copy-ProcessDumpsFromVM @remainingArgs | ConvertTo-Json -Depth 5 }

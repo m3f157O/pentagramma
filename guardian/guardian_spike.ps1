@@ -95,9 +95,22 @@ switch ($Stage) {
             "cert imported, testsigning set"
         } -ArgumentList $guestDir
         Write-Host "[spike] rebooting guest..."
+        # Restart-Computer returns before the guest goes down; key the wait
+        # off the guest reporting a NEWER boot time, not mere readiness.
+        $preBoot = Invoke-Guest { (Get-CimInstance Win32_OperatingSystem).LastBootUpTime }
         Invoke-Guest { Restart-Computer -Force } 2>$null
-        Start-Sleep -Seconds 10
-        Wait-GuestReady -TimeoutSec 300
+        $deadline = (Get-Date).AddSeconds(300)
+        $rebooted = $false
+        while ((Get-Date) -lt $deadline) {
+            try {
+                $bt = Invoke-Command -VMName $VMName -Credential $cred -ScriptBlock {
+                    (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+                } -ErrorAction Stop
+                if ($bt -gt $preBoot) { $rebooted = $true; break }
+            } catch { }
+            Start-Sleep -Seconds 5
+        }
+        if (-not $rebooted) { throw "guest did not come back with a new boot time within 300 s" }
         Write-Host "[spike] guest back up; testsigning state:"
         Invoke-Guest { bcdedit /enum '{current}' | Select-String -Pattern "testsigning" }
     }
@@ -169,6 +182,39 @@ switch ($Stage) {
             Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager' } -MaxEvents 15 -ErrorAction SilentlyContinue |
                 Where-Object { $_.Message -match "SandboxGuard" } |
                 Select-Object TimeCreated, Id, Message | Format-List | Out-String
+        }
+        Write-Host "== bugcheck events (System, BugCheck source / ID 1001) =="
+        Invoke-Guest {
+            Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 1001 } -MaxEvents 3 -ErrorAction SilentlyContinue |
+                Select-Object TimeCreated, Message | Format-List | Out-String
+        }
+        Write-Host "== crash dumps =="
+        Invoke-Guest {
+            Get-ChildItem C:\Windows\Minidump -ErrorAction SilentlyContinue | Select-Object Name, Length, LastWriteTime | Format-Table | Out-String
+            Get-Item C:\Windows\MEMORY.DMP -ErrorAction SilentlyContinue | Select-Object Length, LastWriteTime | Format-List | Out-String
+            Get-ChildItem C:\Windows\LiveKernelReports -Recurse -ErrorAction SilentlyContinue | Select-Object FullName, Length, LastWriteTime | Format-List | Out-String
+        }
+        # Pull the newest minidump to the host for local cdb analysis.
+        # (Copy-VMFile is host->guest only on this build; use a PS session.)
+        Write-Host "== copying newest minidump to host =="
+        $newest = Invoke-Guest {
+            Get-ChildItem C:\Windows\Minidump -Filter *.dmp -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+        }
+        if ($newest) {
+            $dumpDir = Join-Path $PSScriptRoot "dumps"
+            New-Item -ItemType Directory -Force $dumpDir | Out-Null
+            $dest = Join-Path $dumpDir (Split-Path $newest -Leaf)
+            Remove-Item $dest -Force -ErrorAction SilentlyContinue
+            $s = New-PSSession -VMName $VMName -Credential $cred
+            try {
+                Copy-Item -FromSession $s -Path $newest -Destination $dest -Force
+            } finally {
+                Remove-PSSession $s
+            }
+            Write-Host "[diag] minidump -> $dest"
+        } else {
+            Write-Host "[diag] no minidump found"
         }
     }
 

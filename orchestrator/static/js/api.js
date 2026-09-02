@@ -81,6 +81,9 @@ const Api = {
   harnessValidation: (id) => apiRequest(`/api/reports/${encodeURIComponent(id)}/harness-validation`),
   runHarness: () => apiRequest("/api/harness/run", { method: "POST" }),
 
+  // Guardian driver stages: build | load | test | cleanup | spike-*
+  runGuardian: (action) => apiRequest(`/api/guardian/run?action=${encodeURIComponent(action)}`, { method: "POST" }),
+
   getNetworkSummary: (id) => apiRequest(`/api/reports/${encodeURIComponent(id)}/network-summary`),
   getNetworkPacket: (id, index) => apiRequest(`/api/reports/${encodeURIComponent(id)}/network-packets/${encodeURIComponent(index)}`),
   getNetworkPackets: (id, { offset = 0, limit = 100, protocol = "", ip = "", port = "", q = "" } = {}) => {

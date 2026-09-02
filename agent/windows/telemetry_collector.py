@@ -17,6 +17,10 @@ Runs inside the analysis VM. Supports multiple telemetry sources:
                     right before calling collect() (mirrors network capture's
                     start-before/stop-after, executor.py). collect() only
                     READS whatever apitrace.jsonl already contains by then.
+  - guardian     : SandboxGuard.sys driver events (protection denials, module
+                    remap, injection placement) drained by guardian_agent.py
+                    to guardian.jsonl. Same lifecycle carve-out as apitrace:
+                    collect() only READS the file.
 
 Usage inside the guest:
     python telemetry_collector.py init          # install sources, clear logs, write baseline
@@ -53,6 +57,12 @@ APITRACE_FILE = Path("C:\\SandboxAgent\\apitrace.jsonl")
 # range and heuristics.py's own synthetic range (9101-9104), so it can't
 # collide with an indexed Sigma rule or a heuristics-emitted alert.
 APITRACE_SYNTHETIC_EVENT_ID = 9200
+
+
+# Matches guardian.guest_output_file's default in config.yaml. Events are
+# already normalized by guardian_agent.py (source "guardian", synthetic EIDs
+# 9400-9405) -- collect() just passes them through.
+GUARDIAN_FILE = Path("C:\\SandboxAgent\\guardian.jsonl")
 
 
 def _utc_now_iso() -> str:
@@ -220,6 +230,25 @@ class TelemetryCollector:
                 )
         return events
 
+    @staticmethod
+    def _collect_guardian() -> List[Dict]:
+        """Read guardian.jsonl (already stopped by the caller -- same contract
+        as apitrace). guardian_agent.py writes fully-normalized events, so
+        this is a pass-through; malformed lines are skipped, not fatal."""
+        if not GUARDIAN_FILE.exists():
+            return []
+        events: List[Dict] = []
+        with GUARDIAN_FILE.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return events
+
     def _probe_windows_log(self, log_name: str, all_events: List[Dict]) -> None:
         """One-shot diagnostic emitted when a Windows event-log source comes
         back empty or failed: directly query the log for a single record and
@@ -291,6 +320,9 @@ class TelemetryCollector:
 
         if "apitrace" in self.sources:
             self._collect_source("Apitrace", self._collect_apitrace, all_events)
+
+        if "guardian" in self.sources:
+            self._collect_source("Guardian", self._collect_guardian, all_events)
 
         # Sort by timestamp for a unified timeline
         all_events.sort(key=lambda e: e.get("timestamp") or "")

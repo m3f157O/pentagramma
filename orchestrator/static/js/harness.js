@@ -183,3 +183,92 @@ document.getElementById("btn-run-harness").addEventListener("click", async () =>
 
 loadCoverage();
 startPoll(refreshActiveJob, 3000);
+
+// ---------------------------------------------------------------------------
+// Guardian driver section (POST /api/guardian/run; jobs surface via /api/jobs)
+// ---------------------------------------------------------------------------
+
+const GUARDIAN_ACTIONS = ["build", "load", "test", "cleanup"];
+
+function guardianBtn(action) {
+  return document.getElementById(`btn-guardian-${action}`);
+}
+
+function setGuardianButtonsEnabled(on) {
+  GUARDIAN_ACTIONS.forEach((a) => { guardianBtn(a).disabled = !on; });
+}
+
+function setGuardianStatus(msg, isError) {
+  const el = document.getElementById("guardian-status");
+  el.textContent = msg;
+  el.className = "small " + (isError ? "error-text" : "muted");
+}
+
+function renderGuardianJob(job) {
+  const el = document.getElementById("guardian-body");
+  if (!job) {
+    el.innerHTML = `<div class="muted small">No guardian jobs yet this session.</div>`;
+    return;
+  }
+  const statusCls = job.status === "completed" ? "ok" : job.status === "failed" ? "bad" : "";
+  let verdict = "";
+  if (job.report_status === "all_pass") verdict = `<span class="badge pass">ALL PASS</span>`;
+  else if (job.report_status === "checks_failed") verdict = `<span class="badge fail">CHECKS FAILED</span>`;
+  const error = job.error ? `<div class="small error-text" style="margin:6px 0">${escapeHtml(job.error)}</div>` : "";
+  const out = job.output
+    ? `<pre class="small mono" style="white-space:pre-wrap;max-height:320px;overflow:auto;margin:8px 0 0">${escapeHtml(job.output)}</pre>`
+    : "";
+  el.innerHTML = `
+    <div class="small muted">
+      ${escapeHtml(job.sample_filename)} · ${fmtDate(job.created_at)} ·
+      <span class="badge ${statusCls}">${escapeHtml(job.status)}</span> ${verdict}
+    </div>
+    ${error}${out}`;
+}
+
+async function refreshGuardian() {
+  const data = await Api.listJobs();
+  const guardianJobs = (data.jobs || []).filter((j) => j.job_type === "guardian");
+
+  if (data.active_job_id) {
+    const active = (data.jobs || []).find((j) => j.job_id === data.active_job_id);
+    if (active && active.job_type === "guardian") {
+      renderGuardianJob(active);
+      setGuardianStatus(`Running ${active.sample_filename.replace("guardian:", "")} (${active.status})…`);
+    } else {
+      setGuardianStatus("A different job is currently running.");
+    }
+    setGuardianButtonsEnabled(false);
+  } else {
+    setGuardianButtonsEnabled(true);
+    if (guardianJobs.length) {
+      renderGuardianJob(guardianJobs[0]);
+      const latest = guardianJobs[0];
+      if (latest.status === "completed" || latest.status === "failed") {
+        setGuardianStatus(latest.status === "completed" ? "Last stage completed." : "Last stage failed.", latest.status === "failed");
+      }
+    }
+  }
+}
+
+GUARDIAN_ACTIONS.forEach((action) => {
+  guardianBtn(action).addEventListener("click", async () => {
+    setGuardianButtonsEnabled(false);
+    setGuardianStatus(`Submitting ${action}…`);
+    try {
+      await Api.runGuardian(action);
+      setGuardianStatus(`${action} queued.`);
+      await refreshGuardian();
+    } catch (err) {
+      setGuardianButtonsEnabled(true);
+      if (err.status === 409) {
+        setGuardianStatus("A job is already running — try again once it finishes.", true);
+      } else {
+        setGuardianStatus("Failed to start: " + err.message, true);
+      }
+    }
+  });
+});
+
+refreshGuardian();
+startPoll(refreshGuardian, 3000);

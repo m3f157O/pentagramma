@@ -47,10 +47,28 @@
         <tr><td class="empty-state">Loading&hellip;</td></tr>
       </tbody>
     </table>
+
+    <h2>Guardian driver (SandboxGuard.sys)</h2>
+    <p class="small muted">
+      WS-A1a functional flow against the analysis VM: build &amp; sign, load, then the
+      three functional checks (injection placement, Ob process protection, registry
+      protection). Requires the orchestrator to run <b>elevated</b>. Shares the VM slot
+      with analysis jobs. See <span class="mono">docs/guardian-driver.md</span>.
+    </p>
+    <div class="controls">
+      <button id="btn-guardian-build">Build &amp; sign</button>
+      <button id="btn-guardian-load">Load driver</button>
+      <button id="btn-guardian-test">Run tests</button>
+      <button id="btn-guardian-cleanup">Cleanup</button>
+      <span id="guardian-status" class="small muted"></span>
+    </div>
+    <div class="card" id="guardian-body">
+      <div class="muted small">No guardian jobs yet this session.</div>
+    </div>
   </main>
 
-  <script src="js/api.js?v=10"></script>
+  <script src="js/api.js?v=11"></script>
   <script src="js/poll.js?v=5"></script>
-  <script src="js/harness.js?v=5"></script>
+  <script src="js/harness.js?v=6"></script>
 </body>
 </html>
