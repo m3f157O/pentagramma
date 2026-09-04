@@ -171,11 +171,14 @@ def main() -> None:
     no_img = build_pid_lineage(successor_events, 100)
     assert "guid-sample" not in no_img.guids, no_img.guids
     assert no_img.guids == {"guid-wuauclt", "guid-amdelta"}, no_img.guids
-    # With it, root resolves to the real sample; the successor's subtree, though
-    # still in the PID lineage, is guid-excluded from scope.
+    # With it, root resolves to the real sample. The pid set is derived from
+    # the guid tree (2026-09-03 change): the wrong incarnation's child (pid
+    # 200) is excluded from the PID view too -- the guid tree CAN tell the
+    # incarnations apart even though the pid numbers collide, so guid-less
+    # events from pid 200 no longer leak into sample scope either.
     with_img = build_pid_lineage(successor_events, 100, root_image=launcher)
     assert with_img.guids == {"guid-sample"}, with_img.guids
-    assert with_img.pids == {100, 200}, with_img.pids  # PID view can't tell them apart...
+    assert with_img.pids == {100}, with_img.pids  # guid-derived: excludes the wrong incarnation's child
     assert with_img.contains_event({"ProcessId": "100", "ProcessGuid": "guid-sample"}) is True
     assert with_img.contains_event({"ProcessId": "100", "ProcessGuid": "guid-wuauclt"}) is False  # unrelated successor
     assert with_img.contains_event({"ProcessId": "200", "ProcessGuid": "guid-amdelta"}) is False  # ...but guid view excludes its child
@@ -217,6 +220,33 @@ def main() -> None:
     conns = {c["destination_ip"]: c["in_sample_scope"] for c in ioc["network_connections"]}
     assert conns == {"203.0.113.5": True, "198.51.100.9": False}, conns
     print("PASS: build_ioc_summary consumes a PidLineage without crashing and scopes connections via contains_event")
+
+    # --- Regression (2026-09-03, benign_control.bat flapping to malicious/70):
+    # PID-reuse time-window check. The sample (pid 100) dies; Windows recycles
+    # pid 100 for a SYSTEM process whose child reuses pid 555 (formerly the
+    # monitor LOADER's pid). Without the creation-time-vs-termination-time
+    # check, the BFS adopts the recycled child into the lineage and every
+    # guid-less event from pid 555 (e.g. the loader's own NtResumeThread on
+    # the sample) is mis-scoped into the sample. ---
+    reuse_events = [
+        {"event_type": "ProcessCreate", "data": {"ProcessId": "100", "ParentProcessId": "1",
+                                                  "UtcTime": "2026-09-03 18:26:05.000"}},  # sample cmd.exe
+        {"event_type": "ProcessCreate", "data": {"ProcessId": "200", "ParentProcessId": "100",
+                                                  "UtcTime": "2026-09-03 18:26:06.000"}},  # sample's child (legit)
+        {"event_type": "ProcessTerminate", "data": {"ProcessId": "100",
+                                                     "UtcTime": "2026-09-03 18:26:10.000"}},  # sample dies
+        {"event_type": "ProcessCreate", "data": {"ProcessId": "555", "ParentProcessId": "100",
+                                                  "UtcTime": "2026-09-03 18:26:16.700"}},  # recycled-pid child
+    ]
+    reuse_lineage = build_pid_lineage(reuse_events, 100)
+    assert 200 in reuse_lineage.pids, reuse_lineage.pids
+    assert 555 not in reuse_lineage.pids, reuse_lineage.pids
+    print("PASS: child born after parent termination (recycled pid) is excluded from lineage")
+
+    # Fail-open: no ProcessTerminate for the parent -> child accepted as before.
+    open_lineage = build_pid_lineage(reuse_events[:2] + [reuse_events[3]], 100)
+    assert 555 in open_lineage.pids, open_lineage.pids
+    print("PASS: missing parent termination time fails open (child accepted)")
 
     print("\nALL PID LINEAGE TESTS PASSED")
 

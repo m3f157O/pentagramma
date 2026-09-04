@@ -211,3 +211,159 @@ Known noise: updaters (Edge/Chrome) routinely write IFEO keys for their own
 images; job 2 denies them during runs and the events are env-noise-scoped.
 If this ever proves too chatty, narrow the IFEO fragment to our own binary
 names instead of `\Image File Execution Options\` globally.
+
+## 4. A4 tamper canary validation (2026-09-03)
+
+Canary: `tests/local/test-tamper.ps1` — attempts to disable the telemetry
+stack (kill Sysmon64, stop the service, write Defender exclusion, write the
+Sysmon service key, delete the telemetry file). Analysis
+`b95c1b1d-a256-46db-8acb-209ea4ab089f`: **all protected actions denied**.
+
+| Check | Result |
+|---|---|
+| `taskkill /F /IM Sysmon64.exe` | exit 1 — `GuardianProtectedAccess` (taskkill pid 1428 → Sysmon **service** pid 6736, stripped mask 0x1 = PROCESS_TERMINATE) |
+| `Stop-Service Sysmon64` (SCM) | denied |
+| Defender exclusion write (HKLM PS provider) | denied |
+| Sysmon service key write | denied — `GuardianProtectedRegistry` on `Services\Sysmon64` |
+| Telemetry file delete | succeeded — known gap until A1b minifilter (job 3) |
+| Sysmon64 status at end | **Running** |
+
+Bug found by this canary (fixed in `guardian_agent.py`): **two
+`Sysmon64.exe` processes exist during a run** — the service (boot-started)
+and a transient `sysmon64.exe -c` CLI spawned by telemetry_init. The agent
+originally registered only the first PID found (the CLI one), so taskkill
+against the *service* instance succeeded. Fix: `_find_pids_by_image()`
+returns ALL matching PIDs, and the drain loop re-registers newly appeared
+Sysmon64 PIDs each tick (survives service recovery restarts). Verified via
+the registration meta event: `protected_pids=[8040, 6736, 4076]
+sysmon_pids=[4076, 6736]`.
+
+Guest tamper tests must use the PowerShell registry provider, not reg.exe
+(guest policy DisableRegistryTools). Defender Exclusions writes are also
+denied by Defender's own Tamper Protection — either layer achieving the
+deny is acceptable.
+
+A4 remaining: Verifier soak, 20-run stability gate, WoW64 x86 placement
+(needs a 32-bit LoadLibraryW VA helper).
+
+## 5. A4 direct-syscall-spawn injection proof (2026-09-03)
+
+Proof tool: `samples/detection_tests/syscall_spawn.exe` (C source +
+`build_syscall_spawn.cmd` in `syscall_spawn_src/`). Spawns `cmd.exe` via a
+**direct `NtCreateUserProcess` syscall** — SSN resolved from the ntdll stub
+and patched into a hand-built RWX thunk; no Win32/ntdll process-creation API
+in the call path.
+
+Analysis `7e3f3818-9056-4c50-85b7-fa8431061dda`: **PASS**.
+
+| Evidence | Result |
+|---|---|
+| Sample stdout | `{"ssn":200,"mode":"thunk","status":"0x0","child_pid":3284,...,"proof_file":true}` |
+| Driver placement | `GuardianInjectionPlaced` TargetProcessId=**3284** |
+| Sysmon (kernel notify) | `ProcessCreate` pid 3284 (cmd.exe, parent=sample) + `ImageLoad` `monitor_x64.dll` in 3284 |
+
+Two findings of note:
+
+1. **Our own monitor hooks `ntdll!NtCreateUserProcess`** (MinHook), so the
+   tool's first version failed SSN resolution in the guest (`4C 8B D1 B8`
+   pattern overwritten by the hook jmp). Fixed with halos-gate recovery
+   (scan ±64 stubs at 32-byte stride, derive SSN from nearest unhooked
+   neighbor). The proof is thereby *stronger*: the sample fully dodges the
+   user-mode monitor (no ApiCall for the spawn) and the kernel driver still
+   places the monitor into the child.
+2. SSNs differ per Windows build (host=209, guest=200) — dynamic resolution
+   is mandatory, never hardcode.
+
+Gotcha recorded for future toolsmithing: `PS_ATTRIBUTE_IMAGE_NAME` is
+attribute number **5** (`0x20005`), not 6 — using 6 (PsAttributeImageInfo)
+returns STATUS_INVALID_PARAMETER.
+
+## 6. A4 stability gate + tooling-attribution fixes (2026-09-03)
+
+`scripts/guardian_stability_gate.py --runs 20` (alternating
+benign_control.bat / InjectionHarness.exe / test-tamper.ps1): **15/20 PASS**.
+Driver itself was rock solid — every tamper run denied everything (70/70),
+every harness run scored 90, no crashes, no executor flakes. The 5 failures:
+
+- 2x host out-of-memory at Start-VM (infrastructure, not detection)
+- 3x benign_control.bat verdict flap (45, 45, 70) — chased to **tooling
+  attribution bugs**, all fixed and validated offline via
+  `scripts/replay_detection.py`:
+
+  1. **Defender readiness probe self-detection** (+25 on every run): the
+     executor's `defender_ready` step fires the AMSI test string, Defender
+     logs `Virus:Win32/MpTest!amsi`, and `detect_defender_threats` surfaced
+     it as an in-scope sample detection. Fix (heuristics.py): MpTest is
+     filtered out (a sample printing the AMSI test string is still caught by
+     the AmsiScanDetected family, which carries real process attribution).
+  2. **Monitor child-following looks like sample injection** (+8 flap): the
+     monitor injects into the sample's children via
+     `CreateRemoteThread(LoadLibraryW)` from the sample's own context, so
+     Sysmon EID 8 attributes it to the sample (sigma "Remote Thread Creation
+     In Uncommon Target Image"). Fix: `guardian_agent.py` emits the per-boot
+     kernel32!LoadLibraryW VAs in its GuardianRegistered meta event
+     (`loadlibrary_x64=/x86=`), and `reporting.py` marks EID 8 alerts whose
+     StartAddress matches as tooling (in_sample_scope=False, kept for
+     forensics). Detection coverage unaffected — the corpus/harness use
+     shellcode/ExitProcess start addresses, never LoadLibraryW.
+  3. **PID-reuse lineage contamination** (+38 on one run): the sample's pid
+     was recycled after exit; a SYSTEM process holding the reused pid spawned
+     EdgeUpdate children, one reusing the *monitor loader's* pid number, so
+     pid-fallback scoping pulled the loader's own NtResumeThread-on-sample
+     alert (and Edge ImageLoad "hook blind" signatures) into sample scope.
+     Fix (pid_lineage.py): the pid set is now **derived from the ProcessGuid
+     tree** (each in-tree guid incarnation contributes its pid) instead of a
+     bare pid BFS — precise under reuse in both directions: children of a
+     recycled incarnation are never adopted (their ParentProcessGuid names
+     the recycled incarnation), and children of the real sample survive even
+     when the sample's pid number was itself recycled (a pure pid
+     time-window check failed exactly that case: tamper run's taskkill under
+     a recycled powershell pid — caught by the re-gate, fixed before
+     landing). Guid-less telemetry falls back to a time-windowed pid BFS
+     (child born after parent termination = recycled, fail-open otherwise).
+
+Post-fix replay of all gate benign runs: 37→12, 37→12, 45→20, 45→20,
+37→12, 70→35 — uniformly suspicious, flap cured (the residual 20s drop to
+12 once the VA-emitting agent runs in-guest). Harness unchanged at 90;
+tamper canary re-baselines at 46 (was 70 with MpTest included).
+
+Regression tests: `tests/test_tooling_attribution.py` (6 tests) +
+time-window cases in `tests/test_pid_lineage.py`.
+
+## 7. A4 WoW64 x86 injection placement (2026-09-03)
+
+Sample: `samples/detection_tests/wow64_benign.exe` (x86, source in
+`wow64_benign_src/`). Two gaps found and closed:
+
+1. **No 32-bit LoadLibraryW VA** (driver ABI had the `LoadLibraryX86` field
+   but the 64-bit agent can't load 32-bit kernel32): new
+   `agent/windows/guardian_loadlib_x86.exe` (source +
+   `build_loadlib_x86.cmd` in `guardian_loadlib_x86_src/`) prints the 32-bit
+   VA; system DLL bases are per-boot/per-bitness so it is valid for every
+   WoW64 process until reboot. Agent resolves it at startup, fail-open to 0.
+2. **WoW64 trees escaped targeting entirely**: x86 samples are launched by
+   `monitor_loader_x86.exe` (guest-side PE sniff in Execute-Sample), which
+   neither matches the `monitor_loader.exe` target rule nor descends from it.
+   Agent now expands the loader family (registers both basenames).
+
+Validated (analysis `a17d1d4d-49ca-4e9c-85d0-c47e80add954`):
+`GuardianInjectionPlaced Wow64=true` for the sample pid 11172 (+ the x86
+loader 11168), `monitor_x86.dll` confirmed loaded in both via Sysmon
+ImageLoad, no `GuardianInjectionFailed`. Verdict 21/suspicious (benign).
+
+## 8. A4 Driver Verifier soak (2026-09-03)
+
+`POST /api/guardian/run?action=verifier-soak` →
+`guardian/guardian_verifier_soak.ps1`: restores the golden snapshot, enables
+Driver Verifier standard flags on SandboxGuard.sys, reboots, runs the full
+A1a functional battery (injection, kill-block, registry deny) under
+verifier, then restores the snapshot again (verifier config is deliberately
+NOT baked in — normal runs stay verifier-free). A verifier violation would
+bugcheck the guest, surfacing as the guest not coming back / Invoke-Command
+failing.
+
+Result: **all 4 soak checks + all 7 A1a checks PASS** (flags: special pool,
+force IRQL checking, pool tracking, I/O verification, deadlock detection,
+DMA checking, security checks, misc checks, DDI compliance; pool stats
+clean, no deliberate failures). One infrastructure fix along the way:
+Copy-VMFile refuses to overwrite — the soak clears stale stage files first.

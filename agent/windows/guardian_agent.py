@@ -31,6 +31,7 @@ import ctypes
 import json
 import os
 import struct
+import subprocess
 import sys
 import time
 from ctypes import wintypes
@@ -140,11 +141,15 @@ def _open_device():
     return handle
 
 
-def _find_pid_by_image(image_name: str):
-    """PID of the first process whose image matches (tasklist CSV parse --
-    pure stdlib, no WMI/PowerShell needed)."""
+def _find_pids_by_image(image_name: str):
+    """PIDs of ALL processes whose image matches (tasklist CSV parse -- pure
+    stdlib). There can be several: the Sysmon64 service AND transient
+    `sysmon64.exe -c` config-update instances coexist -- returning only the
+    first tasklist row once protected the CLI process while the real service
+    stayed killable (A4 tamper canary)."""
     import csv
     import subprocess
+    pids = []
     try:
         out = subprocess.run(
             ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
@@ -152,41 +157,68 @@ def _find_pid_by_image(image_name: str):
         ).stdout
         for row in csv.reader(out.splitlines()):
             if row and row[0].lower() == image_name.lower():
-                return int(row[1])
+                pids.append(int(row[1]))
     except Exception:
         pass
-    return None
+    return pids
 
 
 def _register_protections(handle, quiet):
     pids = {os.getpid()}
-    sysmon_pid = _find_pid_by_image("Sysmon64.exe")
-    if sysmon_pid:
-        pids.add(sysmon_pid)
+    sysmon_pids = _find_pids_by_image("Sysmon64.exe")
+    pids.update(sysmon_pids)
+    registered = []
     for pid in pids:
         try:
             _ioctl(handle, IOCTL_PROTECT_PID, struct.pack("<II", pid, 0))
+            registered.append(pid)
             if not quiet:
                 print(f"[guardian] protecting pid {pid}")
         except OSError as exc:
             print(f"[guardian] protect pid {pid} failed: {exc}", file=sys.stderr)
+    return registered, sysmon_pids
+
+
+def _find_loadlibraryw_x86(quiet=False):
+    """32-bit kernel32!LoadLibraryW VA via the shipped x86 helper.
+
+    System DLL bases are per-boot/per-bitness, so the address the 32-bit
+    helper prints is valid for every WoW64 process until reboot. Fail-open
+    (return 0): the driver then reports inject_failed for WoW64 targets
+    instead of queueing a bad APC.
+    """
+    helper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "guardian_loadlib_x86.exe")
+    try:
+        out = subprocess.check_output([helper], timeout=15).decode().strip()
+        va = int(out, 16)
+        if not (0x10000 <= va < 0x80000000):
+            raise ValueError(f"implausible VA {out!r}")
+        return va
+    except Exception as exc:
+        if not quiet:
+            print(f"[guardian] x86 LoadLibraryW helper failed ({exc}); "
+                  "WoW64 injection disabled", file=sys.stderr)
+        return 0
 
 
 def _register_injection(handle, dll_x64, dll_x86, quiet):
+    """Returns (loadlibrary_x64_va, loadlibrary_x86_va) for the meta event."""
     if not dll_x64 and not dll_x86:
-        return
+        return 0, 0
     # LoadLibraryW VA in this (x64) process is valid for every x64 target
-    # (system DLL bases are per-boot/per-bitness). x86 stays 0 for now:
-    # no 32-bit helper exists to read the WoW64 kernel32 base, so WoW64
-    # targets log inject_failed(0xC000007A-style) instead of being placed.
+    # (system DLL bases are per-boot/per-bitness). The x86 VA comes from the
+    # shipped 32-bit helper (a 64-bit process cannot load 32-bit kernel32).
     hmod = _k32.GetModuleHandleW("kernel32.dll")
     load_x64 = _k32.GetProcAddress(hmod, b"LoadLibraryW") or 0
-    inbuf = struct.pack("<QQ", load_x64, 0)
+    load_x86 = _find_loadlibraryw_x86(quiet) if dll_x86 else 0
+    inbuf = struct.pack("<QQ", load_x64, load_x86)
     inbuf += _wchars(dll_x64 or "", 260) + _wchars(dll_x86 or "", 260)
     _ioctl(handle, IOCTL_SET_INJECTION, inbuf)
     if not quiet:
         print(f"[guardian] injection: x64={dll_x64 or '-'} x86={dll_x86 or '-'} "
-              f"LoadLibraryW=0x{load_x64:x}")
+              f"LoadLibraryW=0x{load_x64:x}/0x{load_x86:x}")
+    return load_x64, load_x86
 
 
 def _register_targeting(handle, target_image, quiet):
@@ -195,6 +227,14 @@ def _register_targeting(handle, target_image, quiet):
     # standalone mode (2), follow children (1)
     inbuf = struct.pack("<IIII", 2, 0, 1, 0)
     names = [target_image.lower()]
+    # Loader family: x86 samples are launched by monitor_loader_x86.exe
+    # (chosen guest-side by PE sniff in Execute-Sample), which neither matches
+    # a "monitor_loader.exe" rule nor descends from it -- without the family
+    # entry, WoW64 sample trees escape driver injection entirely (confirmed
+    # 2026-09-03: wow64_benign.exe run, zero guardian injection events).
+    for companion in ("monitor_loader.exe", "monitor_loader_x86.exe"):
+        if companion not in names and any(n in ("monitor_loader.exe", "monitor_loader_x86.exe") for n in names):
+            names.append(companion)
     for i in range(8):
         inbuf += _wchars(names[i] if i < len(names) else "", 64)
     _ioctl(handle, IOCTL_SET_TARGETING, inbuf)
@@ -271,18 +311,44 @@ def main() -> int:
 
     try:
         _ioctl(handle, IOCTL_CLEAR_ALL)
-        _register_protections(handle, args.quiet)
-        _register_injection(handle, args.dll_x64, args.dll_x86, args.quiet)
+        protected_pids, sysmon_pids = _register_protections(handle, args.quiet)
+        load_x64, load_x86 = _register_injection(handle, args.dll_x64, args.dll_x86, args.quiet)
         _register_targeting(handle, args.target_image, args.quiet)
+        # Registration meta event: makes the protected set auditable from the
+        # report (a silent tasklist-lookup miss must not look like a driver
+        # bug). The LoadLibraryW VAs let the orchestrator fingerprint the
+        # monitor's own LoadLibraryW-style child-following injections
+        # (Sysmon EID 8 StartAddress == VA) as tooling noise.
+        with out_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps({
+                "source": "guardian",
+                "event_id": EID_UNAVAILABLE,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event_type": "GuardianRegistered",
+                "data": {"Text": f"protected_pids={protected_pids} sysmon_pids={sysmon_pids} "
+                                 f"target={args.target_image or '-'} "
+                                 f"loadlibrary_x64=0x{load_x64:x} loadlibrary_x86=0x{load_x86:x}"},
+            }) + "\n")
         if not args.quiet:
             print("[guardian] active -- draining event ring")
 
         deadline = time.time() + args.max_seconds
         last_seen = 0
+        known_sysmon_pids = set(sysmon_pids)
         with out_path.open("a", encoding="utf-8") as fh:
             while time.time() < deadline:
                 if Path(args.stop_file).exists():
                     break
+                # Sysmon's service can restart mid-run (crash recovery) and a
+                # transient `sysmon64 -c` instance can mask the service pid --
+                # re-resolve ALL instances each tick and protect any new one.
+                for sp in _find_pids_by_image("Sysmon64.exe"):
+                    if sp not in known_sysmon_pids:
+                        try:
+                            _ioctl(handle, IOCTL_PROTECT_PID, struct.pack("<II", sp, 0))
+                            known_sysmon_pids.add(sp)
+                        except OSError:
+                            pass
                 try:
                     events, last_seen = _drain(handle, last_seen)
                 except OSError as exc:

@@ -10,6 +10,7 @@ report: of 20 alerts on one run, only the 4 sharing the sample's own PID
 were genuinely sample-attributed; the rest belonged to unrelated PIDs.
 """
 
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 
@@ -20,6 +21,32 @@ def _basename(path: Optional[str]) -> str:
     if not path:
         return ""
     return path.replace("/", "\\").rsplit("\\", 1)[-1].lower()
+
+
+def _parse_sysmon_time(raw: Any) -> Optional[datetime]:
+    """Parse a Sysmon event timestamp ("2026-09-03 18:26:16.714" or ISO-8601).
+    Returns a naive datetime; all inputs share the same guest clock."""
+    if not raw:
+        return None
+    s = str(raw).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(s)
+        return dt.replace(tzinfo=None)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(s[:26], "%Y-%m-%d %H:%M:%S.%f")
+    except ValueError:
+        try:
+            return datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+
+
+# Slack for the pid-reuse time-window check: same clock source (Sysmon
+# UtcTime), but creation/termination events are written by different kernel
+# callbacks and can arrive marginally out of order.
+_REUSE_WINDOW_SLACK = timedelta(seconds=1)
 
 
 class PidLineage:
@@ -113,17 +140,43 @@ def build_pid_lineage(
     # so root_image can select the incarnation that actually IS the sample.
     root_incarnations: List[Tuple[str, str]] = []
 
+    # Incarnation time windows: pid -> creation time (ProcessCreate UtcTime)
+    # and termination time (ProcessTerminate UtcTime). Windows recycles PIDs
+    # within milliseconds; without a time check, a reused pid's children get
+    # adopted into the sample's lineage and every guid-less event from that
+    # pid number (apitrace, guardian, correlation alerts) is mis-scoped into
+    # the sample (confirmed live 2026-09-03: benign_control.bat's cmd.exe pid
+    # was reused by a SYSTEM process spawning EdgeUpdate children, one of
+    # which reused the monitor_loader's pid -- pulling the loader's own
+    # NtResumeThread-of-the-sample alert in-scope, +15 verdict weight).
+    pid_ctime: Dict[int, datetime] = {}
+    pid_etime: Dict[int, datetime] = {}
+
     for event in events:
         event_type = event.get("event_type") or event.get("EventType")
+        data = event.get("data") or {}
+        if event_type == "ProcessTerminate":
+            try:
+                tpid = int(data.get("ProcessId"))
+            except (TypeError, ValueError):
+                continue
+            # Earliest terminate wins for a recycled pid: the sample
+            # incarnation's death is the window boundary that matters.
+            ts = _parse_sysmon_time(data.get("UtcTime") or event.get("timestamp"))
+            if ts and (tpid not in pid_etime or ts < pid_etime[tpid]):
+                pid_etime[tpid] = ts
+            continue
         if event_type != "ProcessCreate":
             continue
-        data = event.get("data") or {}
         try:
             pid = int(data.get("ProcessId"))
             ppid = int(data.get("ParentProcessId"))
         except (TypeError, ValueError):
             continue
         pid_child_map.setdefault(ppid, []).append(pid)
+        ctime = _parse_sysmon_time(data.get("UtcTime") or event.get("timestamp"))
+        if ctime:
+            pid_ctime.setdefault(pid, ctime)
 
         guid = data.get("ProcessGuid")
         parent_guid = data.get("ParentProcessGuid")
@@ -134,15 +187,6 @@ def build_pid_lineage(
             if parent_guid:
                 guid_child_map.setdefault(parent_guid, []).append(guid)
                 parent_guids_by_ppid.setdefault(ppid, set()).add(parent_guid)
-
-    pids = {root_pid}
-    queue = [root_pid]
-    while queue:
-        current = queue.pop()
-        for child in pid_child_map.get(current, []):
-            if child not in pids:
-                pids.add(child)
-                queue.append(child)
 
     # Resolve the sample's root ProcessGuid, most-authoritative signal first:
     #   1. Image == launcher: the sample runs AS root_image; a PID-reuse
@@ -170,6 +214,43 @@ def build_pid_lineage(
             if child not in guids:
                 guids.add(child)
                 gqueue.append(child)
+
+    pids: Set[int] = set()
+    if guids:
+        # Preferred: derive the pid set from the GUID tree -- each in-tree
+        # guid incarnation contributes its pid. Precise under PID reuse in
+        # BOTH directions (confirmed live 2026-09-03, two opposite failures):
+        #  - children of a RECYCLED incarnation are never adopted (their
+        #    ParentProcessGuid names the recycled incarnation, which is not
+        #    in the guid tree): the benign/70 run's EdgeUpdate children.
+        #  - children of the REAL sample are still adopted even when the
+        #    sample's pid number was itself recycled from an earlier short-
+        #    lived process: the benign/27 run's taskkill (parent powershell
+        #    pid 5168 had a prior incarnation whose termination would have
+        #    failed a pid-only time-window check).
+        guid_to_pid: Dict[str, int] = {}
+        for pid, gset in pid_own_guids.items():
+            for g in gset:
+                guid_to_pid[g] = pid
+        pids = {guid_to_pid[g] for g in guids if g in guid_to_pid}
+        pids.add(root_pid)
+    if not pids:
+        # Fallback (guid-less telemetry): time-windowed pid BFS. A child born
+        # after the parent's (earliest) termination belongs to a recycled
+        # incarnation -- reject; fail-open when timestamps are missing.
+        pids = {root_pid}
+        queue = [root_pid]
+        while queue:
+            current = queue.pop()
+            parent_died = pid_etime.get(current)
+            for child in pid_child_map.get(current, []):
+                if child in pids:
+                    continue
+                child_born = pid_ctime.get(child)
+                if parent_died and child_born and child_born > parent_died + _REUSE_WINDOW_SLACK:
+                    continue
+                pids.add(child)
+                queue.append(child)
 
     return PidLineage(pids, guids)
 
