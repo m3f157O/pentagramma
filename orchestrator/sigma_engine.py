@@ -122,7 +122,7 @@ _SIGMASTRING_ESCAPE_KWARGS = dict(
 
 
 class CompiledRule:
-    __slots__ = ("rule", "event_types", "conditions")
+    __slots__ = ("rule", "event_types", "conditions", "anchors")
 
     def __init__(self, rule: SigmaRule, event_types: List[str]):
         self.rule = rule
@@ -134,6 +134,9 @@ class CompiledRule:
         # being hoisted here to run once at load time instead of once per
         # (event, rule) pair.
         self.conditions = [c.parsed for c in rule.detection.parsed_condition]
+        # Must-match literal anchors for the prefilter (see _harvest_anchors'
+        # Boolean-algebra soundness spec; empty tuple = always evaluate fully).
+        self.anchors: Tuple[Tuple[str, str], ...] = tuple(_harvest_anchors(self.conditions))
 
 
 class CorrelationDetector:
@@ -239,6 +242,11 @@ class SigmaEngine:
         # CPU climbing continuously rather than idling on a lock). This is
         # instance-scoped so it's both correct AND back to O(1) id() lookups.
         self._match_caches = _MatchCaches()
+        # Literal-anchor prefilter (CompiledRule.anchors, checked in
+        # _matches). On by default; SANDBOX_SIGMA_PREFILTER=0 disables for
+        # A/B byte-identical-output validation.
+        import os
+        self._prefilter_enabled = os.environ.get("SANDBOX_SIGMA_PREFILTER", "1") != "0"
         self._load()
 
     def _load(self) -> None:
@@ -313,6 +321,25 @@ class SigmaEngine:
 
         for correlation in correlation_rules:
             self._register_correlation(correlation)
+
+        anchored = 0
+        total = 0
+        for bucket in list(self._by_event_type.values()) + list(self._service_rules.values()):
+            for cr in bucket:
+                total += 1
+                if cr.anchors:
+                    anchored += 1
+        for idx in self._service_event_id_index.values():
+            seen_ids = set()
+            for rules in idx.values():
+                for cr in rules:
+                    if id(cr) in seen_ids:
+                        continue
+                    seen_ids.add(id(cr))
+                    total += 1
+                    if cr.anchors:
+                        anchored += 1
+        logger.info("Sigma prefilter: %d/%d rules carry literal anchors", anchored, total)
 
     def _register_correlation(self, cr: SigmaCorrelationRule) -> None:
         """Register one correlation rule for evaluation. Only event_count is
@@ -420,9 +447,10 @@ class SigmaEngine:
                 # full-pass check against every event from that service.
                 candidates += self._service_rules.get(source, [])
 
+            lowered: Dict[str, str] = {}  # per-event anchor-check field cache
             for compiled in candidates:
                 try:
-                    if self._matches(compiled, event):
+                    if self._matches(compiled, event, lowered):
                         alerts.append(enrich_alert(_build_alert(compiled.rule, event)))
                 except Exception as exc:
                     # A single malformed/unsupported rule must never break
@@ -468,7 +496,36 @@ class SigmaEngine:
                 logger.debug("Correlation rule %s failed to evaluate: %s", getattr(corr.rule, "id", "?"), exc)
         return alerts
 
-    def _matches(self, compiled: CompiledRule, event: Dict[str, Any]) -> bool:
+    def _matches(
+        self,
+        compiled: CompiledRule,
+        event: Dict[str, Any],
+        lowered: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        # Literal-anchor prefilter: for rules whose condition provably
+        # REQUIRES certain literal substrings (see _harvest_anchors'
+        # soundness spec), a missing anchor means the rule cannot match, so
+        # skip the full condition walk. Case-insensitive containment is
+        # implied by the engine's exact-equality literal match (convert()
+        # escapes all regex metachars, then fullmatch), so this can never
+        # skip a true positive. Toggleable for A/B validation of exactly
+        # that claim (SANDBOX_SIGMA_PREFILTER=0).
+        # `lowered` is a per-event cache of already-lowercased field values --
+        # without it the anchor check itself becomes O(rules x field-lower)
+        # on the big buckets (measured: uncached it eats most of the win).
+        if compiled.anchors and self._prefilter_enabled:
+            if lowered is None:
+                lowered = {}
+            for field, anchor in compiled.anchors:
+                lv = lowered.get(field)
+                if lv is None:
+                    value = _resolve_field_value(field, event)
+                    if value is None:
+                        return False
+                    lv = str(value).lower()
+                    lowered[field] = lv
+                if anchor not in lv:
+                    return False
         # detection.condition may be a list of independent condition
         # strings -- each is an alternative match criterion, OR'd together
         # for whether the rule fires overall.
@@ -476,6 +533,69 @@ class SigmaEngine:
             if _evaluate_node(condition, event, self._match_caches):
                 return True
         return False
+
+
+# ---------------------------------------------------------------------------
+# Literal-anchor prefilter
+# ---------------------------------------------------------------------------
+
+def _anchors_of(node: ConditionItem) -> frozenset:
+    """Must-match anchor set for one condition subtree, as a Boolean-algebra
+    constraint propagation:
+
+    - AND  -> union of children (every child's constraints are necessary)
+    - OR   -> intersection of children (only constraints shared by ALL
+      branches are necessary overall)
+    - NOT  -> empty (a negated condition constrains nothing)
+    - field==literal leaf -> {(field, longest-literal-part)} when the value
+      is a SigmaString whose longest plain-text part is >= 4 chars
+      (wildcards fine: fullmatch of `.*lit1.*lit2.*` requires every literal
+      part present in order, so each part is a necessary substring; this
+      covers the |contains/|startswith/|endswith modifier forms, which
+      pySigma models as implicit wildcards)
+    - everything else (regex/cidr/compare/number/exists/null/expansion/
+      keyword/field-ref) -> empty
+
+    A rule's anchor set is the intersection across its alternative
+    conditions (detection.condition can be a list, OR'd). Soundness: an
+    anchor (field, s) is only ever produced where a match provably requires
+    `s` (case-insensitively) in the event's field value; the engine's
+    literal match is exact-equality after convert() escaping (see
+    _match_string), optionally case-sensitive (SigmaCasedString), and
+    case-insensitive containment is implied either way.
+    """
+    if isinstance(node, ConditionAND):
+        out: set = set()
+        for child in node.args:
+            out |= _anchors_of(child)
+        return frozenset(out)
+    if isinstance(node, ConditionOR):
+        child_sets = [set(_anchors_of(c)) for c in node.args]
+        if not child_sets:
+            return frozenset()
+        return frozenset(set.intersection(*child_sets))
+    if isinstance(node, ConditionNOT):
+        return frozenset()
+    if isinstance(node, ConditionFieldEqualsValueExpression):
+        value = node.value
+        if isinstance(value, SigmaString) and not value.contains_placeholder():
+            parts = [p for p in value.s if isinstance(p, str)]
+            if parts:
+                longest = max(parts, key=len)
+                if len(longest) >= 4:
+                    return frozenset({(node.field, longest.lower())})
+        return frozenset()
+    # ConditionValueExpression (keywords) and anything else: no constraint.
+    return frozenset()
+
+
+def _harvest_anchors(conditions: List[ConditionItem]) -> List[Tuple[str, str]]:
+    """Anchor set for a whole rule: intersection across its alternative
+    conditions (see _anchors_of for the soundness algebra)."""
+    if not conditions:
+        return []
+    sets = [set(_anchors_of(c)) for c in conditions]
+    return sorted(set.intersection(*sets))
 
 
 # ---------------------------------------------------------------------------

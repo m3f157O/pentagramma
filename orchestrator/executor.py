@@ -465,6 +465,30 @@ class SandboxExecutor:
         analysis_started_at = datetime.now(timezone.utc)
         _step("started", analysis_id=analysis_id)
 
+        # Full static analysis (YARA-10.7k + capa subprocess) runs on a
+        # background thread overlapping VM boot + the whole guest window --
+        # it's pure host-side work on the uploaded file. One analysis at a
+        # time (serial job queue), yara-python releases the GIL during scans,
+        # capa/signature checks are subprocesses. Joined via _static_result()
+        # at the final report build (and the exception path below).
+        static_holder: Dict[str, Any] = {}
+        static_thread: Optional[threading.Thread] = None
+        if sample_path is not None and execution_error is None:
+            def _static_worker() -> None:
+                try:
+                    static_holder["res"] = self.static_analyzer.analyze(sample_path)
+                except Exception as exc:
+                    static_holder["res"] = {"error": str(exc)}
+
+            static_thread = threading.Thread(target=_static_worker, daemon=True)
+            static_thread.start()
+
+        def _static_result() -> Dict[str, Any]:
+            if static_thread is None:
+                return {}
+            static_thread.join()
+            return static_holder.get("res", {"error": "static worker produced no result"})
+
         if execution_error is not None:
             return self._build_execution_error_report(
                 analysis_id=analysis_id,
@@ -1051,10 +1075,10 @@ class SandboxExecutor:
         # retrieval; no separate download-handling code needed).
         if sample_path is not None:
             sample_file = Path(sample_path)
-            try:
-                static_results = self.static_analyzer.analyze(sample_path)
-            except Exception as exc:
-                static_results = {"error": str(exc)}
+            # The background static-analysis thread started at run-entry has
+            # had the whole VM window to finish; join it here instead of
+            # re-running analyze() serially.
+            static_results = _static_result()
 
             sample_metadata = {
                 "id": analysis_id,

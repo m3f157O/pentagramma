@@ -325,6 +325,13 @@ class StaticAnalyzer:
             "ssdeep": ppdeep.hash(data),
         }
 
+    @classmethod
+    def hash_file(cls, path: Path) -> Dict[str, str]:
+        """Public, cheap, hashes-only pass -- used by the executor to populate
+        sample metadata up front while the full analyze() runs on a background
+        thread (hashes are also how reports get matched to samples)."""
+        return cls._compute_hashes(Path(path).read_bytes())
+
     # ------------------------------------------------------------------
     # Packing / entropy assessment
     # ------------------------------------------------------------------
