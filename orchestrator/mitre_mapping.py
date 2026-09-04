@@ -86,6 +86,12 @@ EVENT_TYPE_TO_MITRE: Dict[str, List[Dict[str, str]]] = {
     "WmiEventFilter": [
         {"technique_id": "T1546.003", "technique_name": "WMI Event Subscription", "tactic": "Persistence"},
     ],
+    "WmiTemporaryConsumer": [
+        {"technique_id": "T1546.003", "technique_name": "WMI Event Subscription", "tactic": "Persistence"},
+    ],
+    "WmiPermanentConsumer": [
+        {"technique_id": "T1546.003", "technique_name": "WMI Event Subscription", "tactic": "Persistence"},
+    ],
     "WmiEventConsumer": [
         {"technique_id": "T1546.003", "technique_name": "WMI Event Subscription", "tactic": "Persistence"},
     ],

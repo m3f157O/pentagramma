@@ -14,6 +14,7 @@ harness_validation.py::validate_harness_alerts, which key on event_id==25 +
 PID + Type substring on entries in report["alerts"].
 """
 
+import math
 import re
 from collections import defaultdict
 from datetime import datetime
@@ -44,6 +45,8 @@ UNCONDITIONAL_ALERT_TYPES = {
     "WmiEventFilter",
     "WmiEventConsumer",
     "WmiEventConsumerToFilter",
+    "WmiTemporaryConsumer",   # WMI-Activity ETW 5860 (Sysmon EID 19-21 is dead
+    "WmiPermanentConsumer",   # on this guest; 5861 = the T1546.003 primitive)
     "FileDelete",
     "FileCreateStreamHash",
     "ClipboardChange",
@@ -665,6 +668,11 @@ def annotate_priority(alerts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     on a subset -- so this cannot affect scripts/harness_assertions.py or
     harness_validation.py::validate_harness_alerts (both only ever read
     event_id/data.ProcessId/data.Type off report["alerts"]).
+
+    Network alerts get the same treatment in both directions: DGA-looking
+    domains are raised (priority=high), known OS/vendor background traffic is
+    marked priority=low -- an annotation for triage sorting only, the alert
+    itself is never dropped (same non-filtering contract as above).
     """
     annotated = []
     for alert in alerts:
@@ -679,8 +687,106 @@ def annotate_priority(alerts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             alert = dict(alert)
             alert["priority"] = "high"
             alert["priority_reason"] = reason
+        elif event_type in _NETWORK_EVENT_TYPES:
+            net = _network_priority(data, event_type)
+            if net:
+                level, net_reason = net
+                # never downgrade an alert another annotator already raised
+                if not (level == "low" and alert.get("priority") == "high"):
+                    alert = dict(alert)
+                    alert["priority"] = level
+                    alert["priority_reason"] = net_reason
         annotated.append(alert)
     return annotated
+
+
+# ---------------------------------------------------------------------------
+# Network triage: DGA-suspect raising + OS-noise lowering for DnsQuery /
+# NetworkConnect alerts. Annotation only (see annotate_priority's contract).
+# ---------------------------------------------------------------------------
+
+_NETWORK_EVENT_TYPES = {"DnsQuery", "NetworkConnect"}
+
+# Well-known OS/first-party background-traffic suffixes. Matching is
+# suffix-on-dot-boundary (foo.windows.com matches; notwindows.com does not).
+# Deliberately narrow: these are the domains a *clean* VM chatters to on
+# every run (time sync, connectivity probes, CRL/OCSP, telemetry).
+_OS_NOISE_DOMAIN_SUFFIXES = (
+    "windows.com", "microsoft.com", "windows.net", "windowsupdate.com",
+    "live.com", "msn.com", "bing.com", "office.com", "office.net",
+    "office365.com", "microsoftonline.com", "azure.com", "trafficmanager.net",
+    "msedge.net", "msftconnecttest.com", "msftncsi.com", "digicert.com",
+    "skype.com", "xboxlive.com", "windowssearch.com", "wns.windows.com",
+)
+
+# DGA heuristics on the registrable (second-level) label: machine-generated
+# C2 names are long, high-entropy, vowel-poor, and often consonant-stacked.
+_DGA_MIN_LABEL_LEN = 12
+_DGA_MIN_ENTROPY = 3.6
+_DGA_MAX_VOWEL_RATIO = 0.40
+_DGA_MIN_CONSONANT_RUN = 6
+
+
+def _shannon_entropy(s: str) -> float:
+    if not s:
+        return 0.0
+    counts = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    n = len(s)
+    return -sum((c / n) * math.log2(c / n) for c in counts.values())
+
+
+def _is_os_noise_domain(name: str) -> bool:
+    for suffix in _OS_NOISE_DOMAIN_SUFFIXES:
+        if name == suffix or name.endswith("." + suffix):
+            return True
+    return False
+
+
+def _dga_suspect_reason(domain: str) -> Optional[str]:
+    """Return a reason string if the domain's registrable label looks
+    machine-generated (DGA), else None. Pure string statistics -- deliberately
+    conservative; this annotates for triage, it never filters."""
+    name = (domain or "").strip(".").lower()
+    if not name or "." not in name:
+        return None
+    if name.endswith(".in-addr.arpa") or name.endswith(".ip6.arpa"):
+        return None  # reverse-DNS, not a queried C2 name
+    if _is_os_noise_domain(name):
+        return None
+    labels = name.split(".")
+    sld = labels[-2] if len(labels) >= 2 else labels[0]
+    if len(sld) < _DGA_MIN_LABEL_LEN or not sld.isascii():
+        return None
+    entropy = _shannon_entropy(sld)
+    if entropy < _DGA_MIN_ENTROPY:
+        return None
+    vowels = sum(1 for ch in sld if ch in "aeiou")
+    if vowels / len(sld) > _DGA_MAX_VOWEL_RATIO:
+        return None
+    if not re.search(r"[bcdfghjklmnpqrstvwxz]{%d,}" % _DGA_MIN_CONSONANT_RUN, sld):
+        return None
+    return (
+        f"DGA-suspect domain (label '{sld[:24]}': len={len(sld)}, "
+        f"entropy={entropy:.2f}, vowel-poor) (T1568.002)"
+    )
+
+
+def _network_priority(data: Dict[str, Any], event_type: str) -> Optional[Tuple[str, str]]:
+    """(level, reason) for a DnsQuery/NetworkConnect alert, or None."""
+    if event_type == "DnsQuery":
+        name = (data.get("QueryName") or "").strip(".").lower()
+    else:
+        name = (data.get("DestinationHostname") or "").strip(".").lower()
+    if not name:
+        return None
+    reason = _dga_suspect_reason(name)
+    if reason:
+        return "high", reason
+    if _is_os_noise_domain(name):
+        return "low", "common OS/vendor background traffic"
+    return None
 
 
 def describe_detectors() -> List[Dict[str, Any]]:
@@ -759,12 +865,14 @@ def describe_detectors() -> List[Dict[str, Any]]:
             "name": "Priority triage annotation",
             "severity": "informational",
             "kind": "annotation",
-            "mitre": ["T1547", "T1543"],
+            "mitre": ["T1547", "T1543", "T1568.002"],
             "description": (
                 "Not a separate alert -- flags registry-persistence keys "
-                "(Run keys, services, etc.) and known-sensitive named pipes as "
-                "priority=high on existing alerts, as a triage hint."
+                "(Run keys, services, etc.), known-sensitive named pipes, and "
+                "DGA-looking domains as priority=high on existing alerts, and "
+                "marks known OS/vendor background-traffic domains priority=low, "
+                "as triage hints."
             ),
-            "detail": sorted(_REGISTRY_EVENT_TYPES | _PIPE_EVENT_TYPES),
+            "detail": sorted(_REGISTRY_EVENT_TYPES | _PIPE_EVENT_TYPES | _NETWORK_EVENT_TYPES),
         },
     ]

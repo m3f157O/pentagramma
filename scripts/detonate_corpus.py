@@ -105,13 +105,22 @@ def get_report(base_url: str, analysis_id: str) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("paths", nargs="+", type=Path, help="Sample files and/or directories of samples")
+    parser.add_argument("paths", nargs="*", type=Path, help="Sample files and/or directories of samples")
+    parser.add_argument("--worklist", type=Path, default=None,
+                        help="text file with one sample path per line (e.g. from verify_groundtruth.py)")
     parser.add_argument("--base-url", default="http://127.0.0.1:18000")
     parser.add_argument("--timeout", type=int, default=90, help="per-sample in-VM execution timeout (seconds)")
     parser.add_argument("--max-wait", type=int, default=900, help="max seconds to wait for a single job to finish")
     args = parser.parse_args()
 
-    samples = collect_samples([p if p.is_absolute() else (PROJECT_ROOT / p) for p in args.paths])
+    raw_paths = [p if p.is_absolute() else (PROJECT_ROOT / p) for p in args.paths]
+    if args.worklist:
+        wl = args.worklist if args.worklist.is_absolute() else PROJECT_ROOT / args.worklist
+        for line in wl.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                raw_paths.append(Path(line))
+    samples = collect_samples(raw_paths)
     if not samples:
         print("No runnable samples found.", file=sys.stderr)
         sys.exit(1)

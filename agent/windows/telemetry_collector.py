@@ -4,6 +4,7 @@ Runs inside the analysis VM. Supports multiple telemetry sources:
   - sysmon      : primary (process, file, registry, network, DNS, etc.)
   - etw_ti      : experimental ETW Threat-Intelligence (injection chains)
   - amsi        : AMSI scan content
+  - wmi_etw     : WMI-Activity ETW (persistence: temporary/permanent consumers)
   - powershell  : PowerShell script block logging
   - security_log: Windows Security event log (logon, account mgmt, service install, etc.)
   - system_log  : Windows System event log (service crashes/installs, NTFS corruption, etc.)
@@ -43,6 +44,7 @@ from etw_ti_collector import EtwTiCollector
 from powershell_logging_manager import PowerShellLoggingManager
 from powershell_parser import POWERSHELL_LOG_NAME, PowerShellParser
 from amsi_collector import AmsiCollector
+from wmi_collector import WmiCollector
 from security_audit_manager import SecurityAuditManager
 from security_log_parser import SECURITY_LOG_NAME, SecurityLogParser
 from system_log_parser import SYSTEM_LOG_NAME, SystemLogParser
@@ -126,6 +128,10 @@ class TelemetryCollector:
         if "amsi" in self.sources:
             print("[telemetry] starting AMSI trace session")
             AmsiCollector().start()
+
+        if "wmi_etw" in self.sources:
+            print("[telemetry] starting WMI-Activity trace session")
+            WmiCollector().start()
 
         if "security_log" in self.sources:
             print("[telemetry] ensuring Security-log audit policy covers the vendored Sigma ruleset")
@@ -302,6 +308,9 @@ class TelemetryCollector:
 
         if "amsi" in self.sources:
             self._collect_source("AMSI", lambda: AmsiCollector().collect(since_iso=since), all_events)
+
+        if "wmi_etw" in self.sources:
+            self._collect_source("WMI-Activity", lambda: WmiCollector().collect(since_iso=since), all_events)
 
         if "security_log" in self.sources:
             n = self._collect_source("Security", lambda: SecurityLogParser().query_events(since_iso=since), all_events)

@@ -371,11 +371,13 @@ def resolve_archive_entry(
                 pwd = candidate.encode("utf-8") if candidate else None
                 content = zf.read(chosen.filename, pwd=pwd)
                 return chosen.filename, content
-            except NotImplementedError as exc:
-                raise ArchiveResolutionError(
-                    "unsupported_encryption",
-                    "Archive uses AES encryption, which is not supported (only legacy ZipCrypto passwords can be tried)",
-                ) from exc
+            except NotImplementedError:
+                # AES-encrypted zip (MalwareBazaar switched to AES): stdlib
+                # zipfile only speaks legacy ZipCrypto -- fall back to
+                # pyzipper, still fully in-memory (no host-disk extraction).
+                return chosen.filename, _read_aes_zip_entry(
+                    data, chosen.filename, candidates, max_entry_size_bytes
+                )
             except RuntimeError as exc:
                 last_error = exc
                 continue
@@ -383,3 +385,42 @@ def resolve_archive_entry(
         raise ArchiveResolutionError(
             "wrong_password", f"Failed to decrypt {chosen.filename!r} with any known password"
         ) from last_error
+
+
+def _read_aes_zip_entry(
+    data: bytes,
+    entry_name: str,
+    password_candidates: List[Optional[str]],
+    max_entry_size_bytes: int,
+) -> bytes:
+    """Read one entry from an AES-encrypted zip via pyzipper (lazy import).
+    Same safety contract as resolve_archive_entry: read() into memory only,
+    never extract to host disk."""
+    try:
+        import pyzipper
+    except ImportError as exc:
+        raise ArchiveResolutionError(
+            "unsupported_encryption",
+            "Archive uses AES encryption and pyzipper is not installed "
+            "(pip install pyzipper into the orchestrator venv)",
+        ) from exc
+    last_error: Optional[Exception] = None
+    for candidate in password_candidates:
+        try:
+            with pyzipper.AESZipFile(io.BytesIO(data)) as azf:
+                info = azf.getinfo(entry_name)
+                if info.file_size > max_entry_size_bytes:
+                    raise ArchiveResolutionError(
+                        "entry_too_large",
+                        f"{entry_name!r} is {info.file_size} bytes, exceeding the {max_entry_size_bytes} cap",
+                    )
+                pwd = candidate.encode("utf-8") if candidate else None
+                return azf.read(entry_name, pwd=pwd)
+        except ArchiveResolutionError:
+            raise
+        except (RuntimeError, OSError, KeyError) as exc:
+            last_error = exc
+            continue
+    raise ArchiveResolutionError(
+        "wrong_password", f"Failed to decrypt {entry_name!r} (AES) with any known password"
+    ) from last_error
