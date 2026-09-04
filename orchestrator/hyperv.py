@@ -48,8 +48,12 @@ class HyperVManager:
             "Copy-NetworkCapture",
             "Copy-ProcessDumps",
             "Copy-DroppedFiles",
+            "Copy-SandboxArchive",
             "Invoke-GuestPython",
             "Restart-Guest",
+            "Console-InputServer-Start",
+            "Console-InputServer-Stop",
+            "Execute-Sample-Interactive",
         }
         vm_username = self.config.hyperv.get("vm_username")
         vm_password = self.config.hyperv.get("vm_password")
@@ -346,6 +350,21 @@ class HyperVManager:
             GuestSourcePaths="|".join(guest_source_paths),
         )
 
+    def copy_sandbox_archive(
+        self,
+        host_destination_dir: str,
+        guest_file_candidates: List[str],
+    ) -> Dict[str, Any]:
+        """Copy selected files out of Sysmon's SYSTEM-ACL-protected deleted-
+        file archive (staged via a SYSTEM scheduled task). Candidates are
+        full guest paths; names are the deterministic '<md5><sha256><ext>'
+        archive form computed from FileDelete event hashes host-side."""
+        return self._run_ps(
+            "Copy-SandboxArchive",
+            HostDestinationDir=host_destination_dir,
+            GuestFileCandidates="|".join(guest_file_candidates),
+        )
+
     def capture_screenshot(
         self,
         output_path: str,
@@ -360,4 +379,47 @@ class HyperVManager:
             OutputPath=output_path,
             WidthPixels=width_pixels,
             HeightPixels=height_pixels,
+        )
+
+    def console_input_server_start(
+        self, agent_dir: str = "C:\\SandboxAgent", ready_timeout_seconds: int = 15
+    ) -> Dict[str, Any]:
+        """Start the guest console-input server in the INTERACTIVE session
+        (scheduled task as the logged-on user). See
+        docs/interactive-console-streaming.md."""
+        return self._run_ps(
+            "Console-InputServer-Start",
+            AgentDir=agent_dir,
+            ReadyTimeoutSeconds=ready_timeout_seconds,
+        )
+
+    def console_input_server_stop(self) -> Dict[str, Any]:
+        return self._run_ps("Console-InputServer-Stop")
+
+    def execute_sample_interactive(
+        self,
+        launcher_path: str,
+        launcher_arguments: str = "",
+        working_directory: Optional[str] = None,
+        timeout_seconds: int = 120,
+        behavioral_tracing: bool = False,
+        monitor_dll_path: Optional[str] = None,
+        monitor_loader_path: Optional[str] = None,
+        monitor_pid_file: Optional[str] = None,
+        agent_dir: str = "C:\\SandboxAgent",
+    ) -> Dict[str, Any]:
+        """Launch the sample on the VISIBLE console session (scheduled task,
+        interactive token) instead of the non-interactive PSDirect session.
+        Same result shape as execute_sample minus process dumps."""
+        return self._run_ps(
+            "Execute-Sample-Interactive",
+            LauncherPath=launcher_path,
+            LauncherArguments=launcher_arguments,
+            WorkingDirectory=working_directory,
+            TimeoutSeconds=timeout_seconds,
+            BehavioralTracing=behavioral_tracing,
+            MonitorDllPath=monitor_dll_path,
+            MonitorLoaderPath=monitor_loader_path,
+            MonitorPidFile=monitor_pid_file,
+            AgentDir=agent_dir,
         )

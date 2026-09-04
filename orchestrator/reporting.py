@@ -1,6 +1,7 @@
 """Structured JSON report generation."""
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -9,7 +10,7 @@ from orchestrator import behavioral_signatures, cape_engine as cape_engine_mod, 
 from orchestrator.config import SandboxConfig
 from orchestrator.ioc_summary import build_ioc_summary
 from orchestrator.mitre_mapping import enrich_alert, compute_coverage
-from orchestrator.pid_lineage import build_pid_lineage, classify_alert_scope
+from orchestrator.pid_lineage import _basename, _parse_sysmon_time, build_pid_lineage, classify_alert_scope
 from orchestrator.proctree import build_process_tree
 from orchestrator.sigma_engine import SigmaEngine
 from orchestrator.verdict import compute_verdict
@@ -56,6 +57,55 @@ def _suppress_launcher_artifact_alerts(
     if not launcher.endswith(_LAUNCH_INTERPRETERS):
         return alerts
     return [a for a in alerts if not (a.get("sigma") and _is_root_launcher_proccreate(a, sample_pid))]
+
+
+def _tooling_loadlibrary_vas(telemetry_events: List[Dict[str, Any]]) -> set:
+    """LoadLibraryW VAs the guardian agent resolved this run (GuardianRegistered
+    meta event). The monitor's child-following injects via
+    CreateRemoteThread(LoadLibraryW) from the sample's own context (see
+    monitor.cpp h_NtCreateUserProcess), so any Sysmon EID 8 whose StartAddress
+    equals one of these VAs is sandbox tooling, not sample behavior -- it
+    fired from our own DLL inside the sample, into the sample's own child.
+    Detection coverage is unaffected: every CreateRemoteThread in the
+    detection corpus/harness uses shellcode or ExitProcess start addresses,
+    never LoadLibraryW."""
+    vas = set()
+    for event in telemetry_events:
+        if event.get("event_type") != "GuardianRegistered":
+            continue
+        text = ((event.get("data") or {}).get("Text")) or ""
+        for m in re.finditer(r"loadlibrary_(?:x64|x86)=0x([0-9a-fA-F]+)", text):
+            va = int(m.group(1), 16)
+            if va:
+                vas.add(va)
+    return vas
+
+
+def _suppress_tooling_remote_thread_alerts(
+    alerts: List[Dict[str, Any]],
+    telemetry_events: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Mark EID 8 CreateRemoteThread alerts whose StartAddress is the per-boot
+    kernel32!LoadLibraryW VA as out-of-sample-scope (they are the monitor's
+    child-following injections). Keeps the alerts in the report for forensic
+    visibility, just unscored. No-op when the guardian agent did not run or
+    emitted no VAs (fail-open: filter simply doesn't apply)."""
+    vas = _tooling_loadlibrary_vas(telemetry_events)
+    if not vas:
+        return alerts
+    out = []
+    for alert in alerts:
+        if alert.get("in_sample_scope") and (alert.get("event_type")) == "CreateRemoteThread":
+            try:
+                start = int(str((alert.get("data") or {}).get("StartAddress") or "0"), 16)
+            except ValueError:
+                start = 0
+            if start in vas:
+                alert = dict(alert)
+                alert["in_sample_scope"] = False
+                alert["scope_reason"] = "tooling: monitor child-following injection (LoadLibraryW StartAddress)"
+        out.append(alert)
+    return out
 
 
 def _apitrace_summary(telemetry_events: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -127,7 +177,32 @@ def compute_detection(
     alerts += [enrich_alert(burst) for burst in heuristics.detect_bursts(telemetry_events)]
     alerts += [enrich_alert(match) for match in heuristics.detect_dump_yara_matches(process_dumps)]
     alerts += [enrich_alert(match) for match in heuristics.detect_dropped_file_yara_matches(dropped_files)]
-    alerts += [enrich_alert(a) for a in heuristics.detect_defender_threats(telemetry_events)]
+    alerts += [enrich_alert(hit) for hit in heuristics.detect_dropped_file_capa_hits(dropped_files)]
+    # Sample start time: lets detect_defender_threats tell our own pre-sample
+    # AMSI readiness probe (MpTest) apart from a sample that prints the AMSI
+    # test string during its run.
+    try:
+        _dd_sample_pid = int(execution_info.get("ProcessId")) if execution_info else None
+    except (TypeError, ValueError):
+        _dd_sample_pid = None
+    _dd_sample_start = None
+    if _dd_sample_pid is not None:
+        _dd_launcher = _basename((execution_info or {}).get("LauncherPath"))
+        for _ev in telemetry_events:
+            if (_ev.get("event_type") or _ev.get("EventType")) != "ProcessCreate":
+                continue
+            _d = _ev.get("data") or {}
+            try:
+                if int(_d.get("ProcessId")) != _dd_sample_pid:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if _dd_launcher and _basename(_d.get("Image")) != _dd_launcher:
+                continue  # recycled-pid predecessor/successor incarnation
+            _ts = _parse_sysmon_time(_d.get("UtcTime") or _ev.get("timestamp"))
+            if _ts and (_dd_sample_start is None or _ts < _dd_sample_start):
+                _dd_sample_start = _ts
+    alerts += [enrich_alert(a) for a in heuristics.detect_defender_threats(telemetry_events, _dd_sample_start)]
     alerts += [enrich_alert(a) for a in behavioral_signatures.detect_behavioral_signatures(telemetry_events)]
     # Sigma matches -- a parallel alert source, already MITRE-enriched internally.
     alerts += sigma_engine.evaluate(telemetry_events) if sigma_engine else []
@@ -155,6 +230,7 @@ def compute_detection(
     alerts = _suppress_launcher_artifact_alerts(alerts, sample_pid, execution_info)
     lineage = build_pid_lineage(telemetry_events, sample_pid, (execution_info or {}).get("LauncherPath"))
     alerts = classify_alert_scope(alerts, lineage)
+    alerts = _suppress_tooling_remote_thread_alerts(alerts, telemetry_events)
     sample_alert_count = sum(1 for a in alerts if a.get("in_sample_scope"))
 
     verdict = compute_verdict(alerts, static_analysis)

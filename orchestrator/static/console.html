@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Console &middot; PENTAGRAMMA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PENTAGRAMMA</div>
+    <nav>
+      <a href="index.html">Dashboard</a>
+      <a href="live.html">Live Trace</a>
+      <a href="traces.html">Traces</a>
+      <a href="reports.html">Reports</a>
+      <a href="rules.html">Rules</a>
+      <a href="harness.html">Injection Harness</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="console.html" class="active">Console</a>
+    </nav>
+    <div style="margin-left:auto">
+      <span id="console-badge" class="badge neutral">closed</span>
+    </div>
+  </header>
+
+  <main>
+    <h1>Interactive VM console</h1>
+    <p class="small muted">
+      Live view of the analysis VM's visible console (~1 fps) with mouse/keyboard input.
+      <b>Interaction changes the detonation</b>: input lands on the desktop the sample
+      (when run with <i>interactive</i>) renders on, and any run in progress while the
+      console is open gets its report tagged <span class="mono">interactive_console</span> &mdash;
+      such reports are not comparable to corpus baselines.
+    </p>
+
+    <div class="card">
+      <div class="card-title">Session</div>
+      <div class="controls" style="margin-top:8px">
+        <button id="btn-open">Open console</button>
+        <button id="btn-close" class="secondary" disabled>Close</button>
+        <span id="console-status" class="small muted"></span>
+      </div>
+    </div>
+
+    <div class="card" id="viewer-card" style="margin-top:12px">
+      <div class="card-title">Screen <span id="frame-info" class="small muted"></span></div>
+      <div id="viewer-wrap" style="margin-top:8px">
+        <img id="viewer" alt="VM console" tabindex="0"
+             style="max-width:100%; border:1px solid #31224f; cursor:crosshair; display:none" />
+        <div id="viewer-empty" class="empty-state">Open the console to see the VM screen.</div>
+      </div>
+      <div class="controls" style="margin-top:8px">
+        <span class="small muted">click = left click &middot; double-click &middot; right-click (context menu) &middot; wheel scrolls &middot; focus the image for keys (Enter/Esc/Tab/arrows/F-keys)</span>
+      </div>
+      <div class="controls" style="margin-top:6px">
+        <input type="text" id="type-text" placeholder="type text into the VM…" style="min-width:300px" />
+        <button id="btn-type" class="secondary">Type</button>
+        <button id="btn-enter" class="secondary">⏎ Enter</button>
+        <button id="btn-esc" class="secondary">Esc</button>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <div class="card-title">Active job</div>
+      <div id="console-job-body" class="small muted" style="margin-top:8px">No job running.</div>
+    </div>
+  </main>
+
+  <script src="js/api.js"></script>
+  <script src="js/poll.js"></script>
+  <script src="js/console.js"></script>
+</body>
+</html>

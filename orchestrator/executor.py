@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from orchestrator import capa_analysis
 from orchestrator.config import SandboxConfig
 from orchestrator.hyperv import HyperVManager
 from orchestrator.pid_lineage import build_pid_lineage
@@ -196,6 +197,124 @@ class SandboxExecutor:
                 break
         return selected
 
+    def _select_archive_deletions(
+        self,
+        events: List[Dict[str, Any]],
+        sample_pid: Optional[int],
+        max_files: int,
+        launcher_path: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
+        """Hashes + original paths of files the sample's lineage DELETED
+        (Sysmon EID 23 FileDelete -- the archived variant; EID 26
+        FileDeleteDetected is log-only and its content is not recoverable).
+        Sysmon's ArchiveDirectory preserves deleted content named
+        '<ALGO>=<hash>'; these hashes are the retrieval+verification keys.
+        Same lineage scoping as _select_dropped_files.
+        """
+        lineage = build_pid_lineage(events, sample_pid, launcher_path)
+        if not lineage:
+            return []
+        out: List[Dict[str, str]] = []
+        seen = set()
+        for event in events:
+            if (event.get("event_type") or event.get("EventType")) != "FileDelete":
+                continue
+            data = event.get("data") or {}
+            guid = data.get("ProcessGuid")
+            if guid and lineage.guids:
+                if guid not in lineage.guids:
+                    continue
+            else:
+                try:
+                    pid = int(data.get("ProcessId"))
+                except (TypeError, ValueError):
+                    continue
+                if pid not in lineage.pids:
+                    continue
+            target = data.get("TargetFilename") or ""
+            for part in (data.get("Hashes") or "").split(","):
+                if "=" not in part:
+                    continue
+                algo, h = part.split("=", 1)
+                algo, h = algo.strip().lower(), h.strip().lower()
+                if algo in ("md5", "sha256") and h and h not in seen:
+                    seen.add(h)
+                    out.append({"hash_algo": algo, "hash": h, "deleted_path": target})
+            if len(out) >= max_files:
+                break
+        return out
+
+    @staticmethod
+    def _static_summary(res: Dict[str, Any]) -> Dict[str, Any]:
+        """Trim a full StaticAnalyzer.analyze() result down to what a dropped-
+        file report entry needs (a raw analyze() result -- full sections,
+        imports with every function, 200 strings -- would bloat the report)."""
+        pe = res.get("pe") or {}
+        dotnet = pe.get("dotnet")
+        dotnet_summary = None
+        if dotnet:
+            dotnet_summary = {
+                "assembly_name": dotnet.get("assembly_name"),
+                "runtime_version": dotnet.get("runtime_version"),
+                "mixed_mode": dotnet.get("mixed_mode"),
+                "entry_point_token": dotnet.get("entry_point_token"),
+                "obfuscator_suspected": dotnet.get("obfuscator_suspected"),
+                "obfuscator_markers": dotnet.get("obfuscator_markers"),
+                "type_refs": (dotnet.get("type_refs") or [])[:25],
+                "user_strings": (dotnet.get("user_strings") or [])[:25],
+            }
+        return {
+            "file_type": (res.get("file_type") or {}).get("name"),
+            "entropy": res.get("entropy"),
+            "packed_suspected": res.get("packed_suspected"),
+            "packing_reasons": res.get("packing_reasons"),
+            "is_pe": bool(pe.get("is_pe")),
+            "machine": pe.get("machine"),
+            "import_dlls": [e.get("dll") for e in (pe.get("imports") or []) if e.get("dll")][:50],
+            "dotnet": dotnet_summary,
+            "yara": res.get("yara") or [],
+            "strings_interesting": (res.get("strings") or {}).get("interesting", [])[:50],
+        }
+
+    def _analyze_retrieved_file(
+        self,
+        item: Dict[str, Any],
+        host_path: str,
+        df_cfg: Dict[str, Any],
+        capa_budget: List[int],
+    ) -> None:
+        """Deep re-analysis of one retrieved dropped/archived file, in place.
+        Full static pipeline minus capa (run_capa=False -- capa is a 180s-
+        bounded subprocess per file, so it runs only on flagged PEs within a
+        per-run budget); capa is attached as item['capa'] when it ran.
+        """
+        if not df_cfg.get("deep_analysis", True):
+            try:
+                data = Path(host_path).read_bytes()
+                item["sha256"] = hashlib.sha256(data).hexdigest()
+                item["yara_matches"] = self.static_analyzer.match_yara(Path(host_path))
+            except Exception as exc:
+                item["yara_matches"] = [{"error": str(exc)}]
+            return
+        try:
+            res = self.static_analyzer.analyze(host_path, run_capa=False)
+            item["sha256"] = (res.get("hashes") or {}).get("sha256")
+            summary = self._static_summary(res)
+            item["static"] = summary
+            item["yara_matches"] = summary["yara"]
+            yara_hits = [m for m in summary["yara"] if "error" not in m]
+            obf = (summary.get("dotnet") or {}).get("obfuscator_suspected")
+            flagged = bool(yara_hits) or summary.get("packed_suspected") or obf
+            if summary.get("is_pe") and flagged and capa_budget[0] > 0:
+                capa_budget[0] -= 1
+                item["capa"] = capa_analysis.analyze_file(host_path, self.static_analyzer.capa_config)
+        except Exception as exc:
+            item["static_error"] = str(exc)
+            try:
+                item["yara_matches"] = self.static_analyzer.match_yara(Path(host_path))
+            except Exception as yara_exc:
+                item["yara_matches"] = [{"error": str(yara_exc)}]
+
     def _build_execution_error_report(
         self,
         analysis_id: str,
@@ -245,6 +364,11 @@ class SandboxExecutor:
             "execution_error_detail": execution_error_detail,
         }
 
+        # Interactive tags: interactive_launch marks a sample run on the
+        # visible console session (per-job opt-in); interactive_console marks
+        # that the browser console was opened at any point during the run
+        # window (analyst input alters the detonation). Either one makes the
+        # report non-comparable to corpus baselines.
         report = self.reporter.build_report(
             analysis_id=analysis_id,
             sample_metadata=sample_metadata,
@@ -282,6 +406,7 @@ class SandboxExecutor:
         url_mode: Optional[str] = None,
         execution_error: Optional[str] = None,
         execution_error_detail: Optional[Any] = None,
+        interactive: bool = False,
     ) -> Dict[str, Any]:
         """
         Run a sample inside the existing VM and return a structured report.
@@ -318,6 +443,14 @@ class SandboxExecutor:
         execution_error set means sample_types.py already determined dynamic
         execution can't proceed (e.g. an ambiguous-entry-point DLL) --
         short-circuits before any VM boot.
+
+        interactive=True launches the sample on the VISIBLE console session
+        (scheduled task, interactive token as the logged-on user) instead of
+        the non-interactive PSDirect session, so UI-driven samples (message
+        boxes, installers) can be watched and clicked via the browser
+        console. Behavior differs from corpus runs (different parent chain,
+        no process dumps) -- such reports are tagged interactive_launch and
+        are not comparable to the corpus baseline.
         """
 
         def _step(name: str, **ctx: Any) -> None:
@@ -329,6 +462,7 @@ class SandboxExecutor:
                 pass
 
         analysis_id = str(uuid.uuid4())
+        analysis_started_at = datetime.now(timezone.utc)
         _step("started", analysis_id=analysis_id)
 
         if execution_error is not None:
@@ -520,18 +654,25 @@ class SandboxExecutor:
 
             # 7d. Start the guardian agent before the sample runs (kernel
             # protection + pre-entry injection placement). Target image = the
-            # launched executable's basename (launcher for script samples,
-            # else the sample itself); driver-side lineage follows children.
-            # Double-placement with the loader is harmless (LoadLibrary of
-            # the same DLL is refcounted; DllMain runs once).
+            # monitor LOADER (the true root of the traced sample tree): the
+            # driver marks it pre-entry and lineage-follows every descendant,
+            # so the sample + its children are placed even through
+            # direct-syscall spawns. Do NOT target the sample/launcher image
+            # (e.g. powershell.exe) -- that also matches the sandbox's own
+            # tooling processes created mid-run (Execute-Sample host etc.),
+            # and injecting the monitor into those intermittently broke the
+            # loader launch (CreateProcess access-denied via the tooling
+            # monitor's own child-following hook). Double-placement with the
+            # loader is harmless (LoadLibrary refcounted, DllMain runs once).
             guardian_start_error: Optional[str] = None
             if guardian_enabled:
                 _step("guardian_start")
                 try:
-                    if launcher_path:
-                        target_image = launcher_path.replace("/", "\\").rsplit("\\", 1)[-1]
+                    if behavioral_tracing_enabled:
+                        loader = bt_cfg.get("guest_loader_path", "")
+                        target_image = loader.replace("/", "\\").rsplit("\\", 1)[-1] if loader else ""
                     else:
-                        target_image = destination_filename or sample_filename or ""
+                        target_image = ""
                     g_result = self.hv.guardian_start(
                         agent_dir=guest_agent_dir,
                         output_file=guardian_guest_file,
@@ -549,24 +690,45 @@ class SandboxExecutor:
 
             # 8. Execute sample
             _step("execute_sample")
-            execution_info = self.hv.execute_sample(
-                sample_path_in_vm=sample_dest,
-                arguments=arguments,
-                timeout_seconds=timeout,
-                dumps_dir=pd_cfg.get("guest_output_dir", "C:\\SandboxAgent\\dumps"),
-                dump_interval_seconds=pd_cfg.get("dump_interval_seconds", 15),
-                max_dumps=pd_cfg.get("max_dumps", 5),
-                max_working_set_bytes=pd_cfg.get("max_working_set_mb", 500) * 1024 * 1024,
-                poll_interval_ms=pd_cfg.get("poll_interval_ms", 250),
-                launcher_path=launcher_path,
-                launcher_arguments=launcher_arguments,
-                working_directory=working_directory_in_vm,
-                behavioral_tracing=behavioral_tracing_enabled,
-                monitor_dll_path=bt_cfg.get("guest_dll_path"),
-                monitor_loader_path=bt_cfg.get("guest_loader_path"),
-                monitor_pid_file=bt_cfg.get("guest_pid_file"),
-                monitor_pid_wait_seconds=bt_cfg.get("monitor_pid_wait_seconds"),
-            )
+            if interactive:
+                # Interactive launch: scheduled task on the visible console
+                # session (see run_analysis docstring). The guest-side merge
+                # of launcher_arguments + arguments that Execute-Sample does
+                # is mirrored here.
+                merged_args = " ".join(p for p in (launcher_arguments, arguments) if p)
+                execution_info = self.hv.execute_sample_interactive(
+                    launcher_path=launcher_path or sample_dest,
+                    launcher_arguments=merged_args,
+                    working_directory=working_directory_in_vm,
+                    timeout_seconds=timeout,
+                    behavioral_tracing=behavioral_tracing_enabled,
+                    monitor_dll_path=bt_cfg.get("guest_dll_path"),
+                    monitor_loader_path=bt_cfg.get("guest_loader_path"),
+                    monitor_pid_file=bt_cfg.get("guest_pid_file"),
+                    agent_dir=guest_agent_dir,
+                )
+                process_dumps_info["enabled"] = False
+                process_dumps_info["note"] = "process dumps are not taken in interactive mode"
+                execution_info["interactive_launch"] = True
+            else:
+                execution_info = self.hv.execute_sample(
+                    sample_path_in_vm=sample_dest,
+                    arguments=arguments,
+                    timeout_seconds=timeout,
+                    dumps_dir=pd_cfg.get("guest_output_dir", "C:\\SandboxAgent\\dumps"),
+                    dump_interval_seconds=pd_cfg.get("dump_interval_seconds", 15),
+                    max_dumps=pd_cfg.get("max_dumps", 5),
+                    max_working_set_bytes=pd_cfg.get("max_working_set_mb", 500) * 1024 * 1024,
+                    poll_interval_ms=pd_cfg.get("poll_interval_ms", 250),
+                    launcher_path=launcher_path,
+                    launcher_arguments=launcher_arguments,
+                    working_directory=working_directory_in_vm,
+                    behavioral_tracing=behavioral_tracing_enabled,
+                    monitor_dll_path=bt_cfg.get("guest_dll_path"),
+                    monitor_loader_path=bt_cfg.get("guest_loader_path"),
+                    monitor_pid_file=bt_cfg.get("guest_pid_file"),
+                    monitor_pid_wait_seconds=bt_cfg.get("monitor_pid_wait_seconds"),
+                )
             # Surface the pre-launch Defender/AMSI readiness result alongside the
             # execution record so the report shows whether AMSI was armed.
             if defender_readiness is not None:
@@ -613,7 +775,7 @@ class SandboxExecutor:
             # with the existing static-analysis YARA engine -- this is *why*
             # dynamic unpacking matters: a packed sample's on-disk YARA scan
             # can miss signatures only visible once unpacked in memory.
-            if process_dumps_enabled:
+            if process_dumps_enabled and not interactive:
                 _step("copy_process_dumps")
                 try:
                     copy_result = self.hv.copy_process_dumps(
@@ -675,6 +837,7 @@ class SandboxExecutor:
                         execution_info.get("LauncherPath"),
                     )
                     dropped_items: List[Dict[str, Any]] = []
+                    capa_budget = [df_cfg.get("deep_analysis_capa_max_files", 3)]
                     if selected_paths:
                         copy_result = self.hv.copy_dropped_files(
                             host_destination_dir=str(host_dropped_files_dir),
@@ -688,6 +851,7 @@ class SandboxExecutor:
                                         "filename": f.get("Filename"),
                                         "original_path": f.get("OriginalPath"),
                                         "status": f.get("Status"),
+                                        "origin": "created",
                                     }
                                 )
                                 continue
@@ -700,6 +864,7 @@ class SandboxExecutor:
                                         "original_path": f.get("OriginalPath"),
                                         "status": "skipped_too_large",
                                         "size_bytes": size_bytes,
+                                        "origin": "created",
                                     }
                                 )
                                 try:
@@ -707,27 +872,119 @@ class SandboxExecutor:
                                 except Exception:
                                     pass
                                 continue
-                            sha256 = None
-                            yara_matches: List[Dict[str, Any]] = []
-                            try:
-                                data = Path(host_path).read_bytes()
-                                sha256 = hashlib.sha256(data).hexdigest()
-                                yara_matches = self.static_analyzer.match_yara(Path(host_path))
-                            except Exception as hash_exc:
-                                yara_matches = [{"error": str(hash_exc)}]
-                            dropped_items.append(
-                                {
-                                    "filename": f.get("Filename"),
-                                    "original_path": f.get("OriginalPath"),
-                                    "path": host_path,
-                                    "size_bytes": size_bytes,
-                                    "sha256": sha256,
-                                    "status": "retrieved",
-                                    "yara_matches": yara_matches,
-                                }
-                            )
+                            item: Dict[str, Any] = {
+                                "filename": f.get("Filename"),
+                                "original_path": f.get("OriginalPath"),
+                                "path": host_path,
+                                "size_bytes": size_bytes,
+                                "status": "retrieved",
+                                "origin": "created",
+                            }
+                            self._analyze_retrieved_file(item, host_path, df_cfg, capa_budget)
+                            dropped_items.append(item)
                         if copy_result.get("Status") != "copied":
                             dropped_files_info["error"] = copy_result.get("Status")
+
+                    # 8c. Sysmon deleted-file archive: content of files the
+                    # sample created AND deleted survives in the guest's
+                    # ArchiveDirectory (SYSTEM-ACL-protected, staged via a
+                    # SYSTEM scheduled task in Copy-SandboxArchiveFromVM).
+                    # Archived filenames are the configured hash algorithms
+                    # joined + original extension (NOT a fixed 'ALGO=hash'
+                    # form), so matching is by hash-substring on the filename
+                    # followed by content-hash verification against the
+                    # sample-lineage FileDelete events. Closes the
+                    # self-cleaning-dropper blind spot (drop -> run -> delete
+                    # used to lose the payload entirely).
+                    if df_cfg.get("retrieve_deleted_archive", True):
+                        _step("copy_sandbox_archive")
+                        deletions = self._select_archive_deletions(
+                            events,
+                            sample_pid,
+                            df_cfg.get("max_archive_files", 20),
+                            execution_info.get("LauncherPath"),
+                        )
+                        if deletions:
+                            # Deterministic archive names: '<md5><sha256><ext>'
+                            # (uppercase hex, no separators) under our config's
+                            # md5+sha256 HashAlgorithms; single-hash forms as
+                            # fallback if the hash config ever changes.
+                            archive_dir = df_cfg.get("guest_archive_dir", "C:\\SandboxArchive")
+                            by_deleted_path: Dict[str, List[Dict[str, str]]] = {}
+                            for d in deletions:
+                                by_deleted_path.setdefault(d["deleted_path"], []).append(d)
+                            candidates: List[str] = []
+                            cand_map: Dict[str, Dict[str, str]] = {}  # leaf name -> deletion
+                            for deleted_path, dlist in by_deleted_path.items():
+                                ext = Path(deleted_path).suffix
+                                hashes = {d["hash_algo"]: d for d in dlist}
+                                names = []
+                                if "md5" in hashes and "sha256" in hashes:
+                                    names.append((hashes["md5"]["hash"] + hashes["sha256"]["hash"]).upper() + ext)
+                                for algo in ("sha256", "md5"):
+                                    if algo in hashes:
+                                        names.append(hashes[algo]["hash"].upper() + ext)
+                                for name in names:
+                                    if name not in cand_map:
+                                        # verify against sha256 when present
+                                        cand_map[name] = hashes.get("sha256") or hashes.get("md5")
+                                        candidates.append(archive_dir + "\\" + name)
+                            arch_result = self.hv.copy_sandbox_archive(
+                                host_destination_dir=str(host_dropped_files_dir / "archive"),
+                                guest_file_candidates=candidates,
+                            )
+                            if arch_result.get("Status") != "copied":
+                                dropped_files_info["archive_error"] = arch_result.get("Status")
+                            max_size_bytes = df_cfg.get("max_file_size_mb", 50) * 1024 * 1024
+                            retrieved_hashes = set()
+                            for f in arch_result.get("Files") or []:
+                                host_path = f.get("HostPath")
+                                leaf = f.get("Filename") or ""
+                                if not host_path:
+                                    continue
+                                match = cand_map.get(leaf.upper()) or cand_map.get(leaf)
+                                if match is None:
+                                    # staged but not one of ours (name-collision
+                                    # safety net): drop it
+                                    Path(host_path).unlink(missing_ok=True)
+                                    continue
+                                try:
+                                    data = Path(host_path).read_bytes()
+                                except Exception:
+                                    continue
+                                # Verify content hash against the FileDelete
+                                # event's -- never trust the filename form.
+                                actual = hashlib.new(match["hash_algo"], data).hexdigest().lower()
+                                if actual != match["hash"]:
+                                    Path(host_path).unlink(missing_ok=True)
+                                    continue
+                                if match["hash"] in retrieved_hashes:
+                                    Path(host_path).unlink(missing_ok=True)
+                                    continue  # same content archived twice
+                                retrieved_hashes.add(match["hash"])
+                                if len(data) > max_size_bytes:
+                                    Path(host_path).unlink(missing_ok=True)
+                                    dropped_items.append(
+                                        {
+                                            "filename": f.get("Filename"),
+                                            "original_path": match["deleted_path"],
+                                            "status": "skipped_too_large",
+                                            "size_bytes": len(data),
+                                            "origin": "sysmon_archive",
+                                        }
+                                    )
+                                    continue
+                                item = {
+                                    "filename": f.get("Filename"),
+                                    "original_path": match["deleted_path"],
+                                    "path": host_path,
+                                    "size_bytes": len(data),
+                                    "status": "retrieved",
+                                    "origin": "sysmon_archive",
+                                }
+                                self._analyze_retrieved_file(item, host_path, df_cfg, capa_budget)
+                                dropped_items.append(item)
+
                     dropped_files_info["count"] = len(
                         [i for i in dropped_items if i.get("status") == "retrieved"]
                     )
@@ -851,6 +1108,15 @@ class SandboxExecutor:
             error=error,
             sigma_engine=self.sigma_engine,
         )
+
+        report["interactive_launch"] = bool(interactive)
+        try:
+            from orchestrator.console import get_console_manager
+            console_mgr = get_console_manager(create=False)
+            if console_mgr is not None and console_mgr.used_between(analysis_started_at, datetime.now(timezone.utc)):
+                report["interactive_console"] = True
+        except Exception:
+            pass  # tagging must never fail the report
 
         report_path = self.reporter.save_report(analysis_id, report)
         report["report_path"] = str(report_path)

@@ -64,7 +64,9 @@ function renderJobPanel(job) {
   if (job.status === "failed") statusBadgeClass = "bad";
 
   let footer = "";
-  if (job.status === "completed" && job.analysis_id) {
+  if (job.status === "running") {
+    footer = `<div class="small" style="margin-top:8px"><a href="console.html">Live console →</a></div>`;
+  } else if (job.status === "completed" && job.analysis_id) {
     footer = `<div class="small" style="margin-top:8px"><a href="report.html?id=${encodeURIComponent(job.analysis_id)}">View report →</a></div>`;
   } else if (job.error) {
     footer = `<div class="error-text small" style="margin-top:8px">${escapeHtml(job.error)}</div>`;
@@ -271,6 +273,7 @@ function wireSubmitForm() {
     fd.append("arguments", document.getElementById("arguments").value || "");
     const timeoutVal = document.getElementById("timeout").value;
     if (timeoutVal) fd.append("timeout", timeoutVal);
+    if (document.getElementById("interactive").checked) fd.append("interactive", "true");
 
     setSubmitStatus("Submitting...");
     try {

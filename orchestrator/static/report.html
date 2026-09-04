@@ -17,6 +17,7 @@
       <a href="rules.html">Rules</a>
       <a href="harness.html">Injection Harness</a>
       <a href="architecture.html">Architecture</a>
+      <a href="console.html">Console</a>
     </nav>
     <div style="margin-left:auto">
       <a id="report-json-link" href="#" target="_blank" class="small">raw JSON &nearr;</a>
@@ -144,6 +145,17 @@
         <div class="small muted module-note">API-trace &harr; Sysmon counterpart correlation (curated in <span class="mono">orchestrator/data/coverage_map.yaml</span>): every Sysmon event in a &ldquo;both&rdquo;-class family should have a hooked-call counterpart from the same process within a 2s window. &ge;2 misses per process/hook = the sample is unhooking the monitor or using direct syscalls (<b>ApitraceBlindSpot</b>, T1562.001); a trace that goes silent while Sysmon stays active = <b>ApitraceSilence</b>. See <span class="mono">docs/coverage-table.md</span>.</div>
         <div id="blindspots-coverage" style="margin-bottom:10px"></div>
         <div id="blindspots-browser"></div>
+      </div>
+    </details>
+
+    <details class="section" id="sec-guardian">
+      <summary>Guardian &mdash; kernel driver (<span id="guardian-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted module-note">SandboxGuard kernel driver verdicts: denied access to protected processes (<b>GuardianProtectedAccess</b>, EID 9401) and protected registry keys (<b>GuardianProtectedRegistry</b>, 9402), module remaps (<b>GuardianModuleRemap</b>, 9403), injection-placement failures (<b>GuardianInjectionFailed</b>, 9405). A denied tamper attempt here means the driver actively <i>blocked</i> the sample &mdash; among the strongest signals in a report. Raw events also include the informational registration/placement meta events (9400/9404) that prove the driver was alive for the run.</div>
+        <h3>Driver alerts</h3>
+        <div id="guardian-alerts-browser"></div>
+        <h3 style="margin-top:16px">Raw driver events <span class="muted small">(EIDs 9400&ndash;9405, incl. informational)</span></h3>
+        <div id="guardian-events-browser"></div>
       </div>
     </details>
 
@@ -298,6 +310,6 @@
   <script src="js/event_browser.js?v=3"></script>
   <script src="js/network_view.js?v=10"></script>
   <script src="js/screenshot_view.js?v=7"></script>
-  <script src="js/report_detail.js?v=25"></script>
+  <script src="js/report_detail.js?v=27"></script>
 </body>
 </html>

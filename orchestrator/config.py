@@ -95,6 +95,10 @@ class SandboxConfig:
     def guardian(self) -> Dict[str, Any]:
         return self._data.get("guardian", {})
 
+    @property
+    def console(self) -> Dict[str, Any]:
+        return self._data.get("console", {})
+
 
 def get_config() -> SandboxConfig:
     env_path = os.environ.get("SANDBOX_CONFIG")

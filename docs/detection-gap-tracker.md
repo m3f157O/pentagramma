@@ -196,8 +196,8 @@ real historical data.
 
 **Static analysis**
 - No VT API key configured — cloud reputation still doesn't run.
-- Only one YARA file (~5 rules); no packer-signature database, no family-specific rules.
-- No .NET/CLR-aware analysis (native PE parsing only; the project's own test sample is .NET).
+- ~~Only one YARA file (~5 rules)~~ **Resolved 2026-09-04**: YARA-Forge **extended** tier vendored (10,763 compiled rules, `yara-forge-extended-20260830`, via new `scripts/fetch_yara_forge.py` + `vendor_yara_rules.py`); project-owned customs stay in `yara/`. Per-sample drift scan over all 92 on-disk samples: zero new hits; one upstream removal (`COD3NYM_DOTNET_Singlefilehost_Bundled_App`, used to fire on InjectionHarness → its next *live* score drops ~15 pts from the lost static-YARA weight; replays unaffected).
+- ~~No .NET/CLR-aware analysis~~ **Resolved 2026-09-04**: `static_analysis.py::parse_dotnet()` (dnfile — already installed as capa's backend): CLR runtime version, assembly name, entrypoint token, IL-only/mixed-mode flag, metadata streams, TypeRef/TypeDef names, `#US` user-strings heap, obfuscator markers (ConfuserEx/Dotfuscator/SmartAssembly/… → scored +5 in `classify_static`). capa already auto-extracted .NET; the UI static tab now shows the .NET subsection + capa `dotnet` format badge.
 - No overlay/appended-data detection, no certificate chain/revocation validation.
 - `ssdeep` hash computed but nothing consumes it (no similarity search).
 
@@ -221,7 +221,7 @@ real historical data.
 - EID25+EID255 ghosting-correlation heuristic (suggested, not built).
 
 **File system activity**
-- **Dropped-file retrieval is still the single largest gap** — archived content never comes back to the host for re-analysis.
+- ~~Dropped-file retrieval is still the single largest gap~~ **Resolved 2026-09-04**: (a) lineage-scoped dropped files now get full deep static re-analysis (`StaticAnalyzer.analyze()` — entropy/packing/PE/.NET/strings/YARA; capa on flagged PEs within a per-run budget of 3) instead of hash+YARA only, plus `DroppedFileCapaHit` alerts (EID 9106) for high-signal capa capabilities; (b) Sysmon's `C:\SandboxArchive` deleted-file content is now retrieved and hash-correlated to sample-lineage `FileDelete` events (`origin: "sysmon_archive"` in the report) — self-cleaning droppers no longer lose their payload.
 - Mass-file-modification threshold untested against real ransomware behavior.
 - `RawAccessRead` has no significance-scoring (no distinction for `$MFT`/SAM/SYSTEM raw reads).
 - No path scoping (kept broad on purpose).
@@ -244,7 +244,7 @@ real historical data.
 
 **Network connections / DNS queries**
 - No priority annotation (unlike registry/pipe events) — an outbound connection to a known-malicious IP/port or a DGA-looking domain gets the same unconditional-alert treatment as a benign one; no allow-list for common OS background traffic (Windows telemetry, time sync, license activation) either, so those show up as alerts too.
-- No burst detection for connection/DNS floods (e.g. DNS tunneling exfil, port-scanning) — the unconditional-alert approach was verified safe against *normal* per-run volume (~30/~19 events), but a sample that deliberately floods connections or queries would currently just produce a very long, unranked alert list rather than a single synthesized "burst" alert like `ProcessBurstDetected`/`MassFileModificationDetected` already do for other event types.
+- ~~No burst detection for connection/DNS floods~~ **Resolved 2026-09-04**: `NetworkBurstDetected` (synthetic EID 9105, `heuristics._detect_network_bursts`) — per-process 10s-window detection of port scans (≥15 distinct ports per destination), connection floods (≥40), DNS floods (≥50) and DNS-tunneling suspects (≥20 mostly-unique queries averaging ≥52 chars); MITRE T1046/T1071.004/T1572/T1048, high severity for port_scan/dns_tunnel_suspect. Canary replay: zero verdict drift.
 - Not cross-referenced with the separate pcap capture (14) — Sysmon's `NetworkConnect` has process/PID attribution that raw packets don't, and pcap has full payload bytes that Sysmon doesn't; today these are two independent views, not one correlated one.
 
 **Full network packet capture (pktmon/pcapng)**

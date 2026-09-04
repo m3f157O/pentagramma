@@ -916,7 +916,7 @@ function renderStaticAnalysis() {
     capaHtml = `
       <div class="small muted">${capa.capability_count} capabilities · ${capa.high_signal_count} high-signal · ${
       (capa.attack || []).length
-    } ATT&CK techniques · capa ${escapeHtml(capa.capa_version || "?")}</div>
+    } ATT&CK techniques · capa ${escapeHtml(capa.capa_version || "?")}${capa.format === "dotnet" ? ' · <span class="badge neutral">.NET</span>' : ""}</div>
       <table class="compact">
         <thead><tr><th>Capability</th><th>Namespace</th><th>ATT&CK</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="3" class="empty-state">No capabilities matched</td></tr>'}</tbody>
@@ -926,9 +926,32 @@ function renderStaticAnalysis() {
     capaHtml = `<div class="muted small">capa: ${escapeHtml(why)}.</div>`;
   }
 
+  // .NET / CLR metadata subsection (dnfile); absent for native PEs.
+  let dotnetHtml = "";
+  const dn = (pe && pe.dotnet) || null;
+  if (dn) {
+    const obf = dn.obfuscator_suspected
+      ? ` <span class="badge bad">obfuscator: ${escapeHtml((dn.obfuscator_markers || []).join(", "))}</span>`
+      : ' <span class="badge ok">no obfuscator markers</span>';
+    const trs = (dn.type_refs || []).slice(0, 25).map(escapeHtml).join("\n");
+    const uss = (dn.user_strings || []).slice(0, 25).map(escapeHtml).join("\n");
+    dotnetHtml = `
+      <h3>.NET assembly</h3>
+      <div class="small">${escapeHtml(dn.assembly_name || "(unnamed)")} · runtime ${escapeHtml(dn.runtime_version || "?")} · ${
+      dn.mixed_mode ? "mixed-mode (native+IL)" : "pure IL"
+    }${obf}</div>
+      <div class="small muted">streams: ${(dn.metadata_streams || []).map(escapeHtml).join(" ") || "-"} · ${
+      (dn.type_refs || []).length
+    } typerefs shown (${(dn.type_defs || []).length} typedefs) · ${(dn.user_strings || []).length} user strings</div>
+      <details class="aux-details" style="margin-top:6px"><summary>TypeRefs</summary><pre class="log">${trs || "(none)"}</pre></details>
+      <details class="aux-details" style="margin-top:6px"><summary>#US user strings</summary><pre class="log">${uss || "(none)"}</pre></details>
+    `;
+  }
+
   el.innerHTML = `
     <h3>PE structure</h3>
     ${peHtml}
+    ${dotnetHtml}
     <h3>Interesting strings (${interesting.length})</h3>
     <pre class="log">${interesting.map(escapeHtml).join("\n") || "(none)"}</pre>
     <div class="small muted">ascii: ${strings.ascii_count ?? "-"} · unicode: ${strings.unicode_count ?? "-"}</div>
@@ -1028,7 +1051,7 @@ function renderDroppedFiles() {
   container.innerHTML = `
     ${df.error ? `<div class="small error-text" style="margin-bottom:8px">${escapeHtml(df.error)}</div>` : ""}
     <table>
-      <thead><tr><th>#</th><th>Filename</th><th>Original path</th><th>Size</th><th>SHA256</th><th>YARA matches</th><th>Status</th><th></th></tr></thead>
+      <thead><tr><th>#</th><th>Filename</th><th>Original path</th><th>Origin</th><th>Size</th><th>SHA256</th><th>Static</th><th>YARA matches</th><th>Status</th><th></th></tr></thead>
       <tbody>
         ${items
           .map((item, i) => {
@@ -1038,12 +1061,26 @@ function renderDroppedFiles() {
               ? matches.map((m) => `<span class="badge bad">${escapeHtml(m.rule)}</span>`).join(" ")
               : `<span class="muted small">none</span>`;
             const statusClass = retrieved ? "ok" : "warn";
+            const origin = item.origin === "sysmon_archive"
+              ? '<span class="badge warn" title="content recovered from Sysmon\'s deleted-file archive">deleted</span>'
+              : '<span class="badge neutral">created</span>';
+            // Static deep-analysis chips: packed / .NET obfuscator / capa.
+            const st = item.static || {};
+            const chips = [];
+            if (st.packed_suspected) chips.push('<span class="badge warn">packed</span>');
+            if (st.dotnet && st.dotnet.obfuscator_suspected) chips.push(`<span class="badge bad">.NET obf: ${escapeHtml((st.dotnet.obfuscator_markers || []).join(", "))}</span>`);
+            else if (st.dotnet) chips.push('<span class="badge neutral">.NET</span>');
+            const capa = item.capa || {};
+            if (capa.available && capa.high_signal_count) chips.push(`<span class="badge bad">capa ×${capa.high_signal_count}</span>`);
+            const staticCell = retrieved ? (chips.join(" ") || `<span class="muted small">${escapeHtml(st.file_type || "clean")}</span>`) : "-";
             return `<tr>
               <td>${i}</td>
               <td class="mono small">${escapeHtml(item.filename)}</td>
               <td class="mono small">${escapeHtml(item.original_path)}</td>
+              <td>${origin}</td>
               <td>${retrieved ? fmtBytes(item.size_bytes) : "-"}</td>
-              <td class="mono small">${retrieved ? escapeHtml(item.sha256) : "-"}</td>
+              <td class="mono small">${retrieved ? escapeHtml(item.sha256 || "") : "-"}</td>
+              <td>${staticCell}</td>
               <td>${retrieved ? badges : "-"}</td>
               <td><span class="badge ${statusClass}">${escapeHtml(item.status)}</span></td>
               <td>${retrieved ? `<a href="${Api.droppedFileDownloadUrl(analysisId, i)}" download>download</a>` : ""}</td>
@@ -1303,6 +1340,10 @@ const OTHER_SYSMON_EVENT_TYPES = [
 ];
 const EVENTLOG_SOURCES = ["security", "system", "windefend"];
 const BLINDSPOT_ALERT_TYPES = ["ApitraceBlindSpot", "ApitraceSilence"];
+const GUARDIAN_ALERT_TYPES = ["GuardianProtectedAccess", "GuardianProtectedRegistry", "GuardianModuleRemap", "GuardianInjectionFailed"];
+function guardianAlertCount() {
+  return (report.alerts || []).filter((a) => GUARDIAN_ALERT_TYPES.includes(a.event_type)).length;
+}
 
 function eventTypeCounts() {
   return (((report || {}).summary || {}).event_counts) || {};
@@ -1340,6 +1381,7 @@ const NAV_GROUPS = [
     { target: "sec-injection", label: "Injection", count: () => typeCount(INJECTION_EVENT_TYPES) },
     { target: "sec-hooks", label: "API trace", count: () => Object.values(((report || {}).apitrace || {}).calls_per_pid || {}).reduce((a, b) => a + b, 0) },
     { target: "sec-blindspots", label: "Blind spots", count: () => (report.alerts || []).filter((a) => BLINDSPOT_ALERT_TYPES.includes(a.event_type)).length, alerty: true },
+    { target: "sec-guardian", label: "Guardian", count: guardianAlertCount, alerty: true },
     { target: "sec-scripts", label: "Scripts", count: () => typeCount(SCRIPT_EVENT_TYPES) },
     { target: "sec-processes", label: "Processes", count: () => typeCount(PROCESS_EVENT_TYPES) },
     { target: "sec-filesystem", label: "Filesystem", count: () => typeCount(FILE_EVENT_TYPES) + ((report.dropped_files || {}).count || 0) },
@@ -1772,6 +1814,22 @@ function wireTelemetryTabs() {
     emptyText: "No blind-spot or silence alerts for this run.",
   });
   if (blindspots) registerLazy("sec-blindspots", blindspots.load);
+
+  const guardianAlerts = mk("guardian-alerts-browser", "guardian", {
+    endpoint: "alerts", eventTypes: GUARDIAN_ALERT_TYPES,
+    searchPlaceholder: "filter target / pid…",
+    emptyText: "No guardian driver alerts for this run.",
+  });
+  const guardianEvents = mk("guardian-events-browser", "guardian", {
+    source: "guardian", eventTypes: [],
+    searchPlaceholder: "filter driver event detail…",
+    emptyText: "No guardian driver events captured for this run.",
+  });
+  if (guardianAlerts || guardianEvents) registerLazy("sec-guardian", () => {
+    if (guardianAlerts) guardianAlerts.load();
+    if (guardianEvents) guardianEvents.load();
+  });
+  setText("guardian-count", guardianAlertCount());
   renderBlindspotCoverage();
   setText("blindspots-count", (report.alerts || []).filter((a) => BLINDSPOT_ALERT_TYPES.includes(a.event_type)).length);
   setText("eventlogs-count", eventlogCount());

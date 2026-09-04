@@ -1342,6 +1342,135 @@ function Copy-ProcessDumpsFromVM {
     }
 }
 
+function Copy-SandboxArchiveFromVM {
+    <#
+    .SYNOPSIS
+        Copies SELECTED files out of Sysmon's deleted-file archive
+        (ArchiveDirectory, default C:\SandboxArchive) to the host.
+
+        Two constraints, both empirically confirmed 2026-09-04:
+        - the archive dir is protected with a SYSTEM-only ACL (gigi cannot
+          even Test-Path inside it) -> all archive access goes through a
+          one-shot scheduled task running as SYSTEM, staging matches into a
+          gigi-readable dir;
+        - archived filenames are the configured hash algorithms concatenated
+          (uppercase hex, no separators) + the original extension, e.g.
+          <md5><sha256>.exe -- so the host computes the exact expected names
+          from FileDelete event hashes and passes them in as candidates
+          (GuestFileCandidates, "|"-delimited, same convention as
+          Copy-DroppedFilesFromVM). The archive can hold tens of thousands
+          of residue files from the golden image -- never bulk-copy it.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VMName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$HostDestinationDir,
+
+        [Parameter(Mandatory = $true)]
+        [string]$GuestFileCandidates,
+
+        [Parameter(Mandatory = $false)]
+        [string]$StagingDir = "C:\SandboxAgent\archive_pull",
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialUsername,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialPassword
+    )
+
+    Assert-VMExists -VMName $VMName | Out-Null
+    if (-not (Test-Path $HostDestinationDir)) { New-Item -ItemType Directory -Path $HostDestinationDir -Force | Out-Null }
+
+    $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
+    $invokeArgs = @{ VMName = $VMName }
+    if ($cred) { $invokeArgs['Credential'] = $cred }
+
+    # 1. Write the candidate list (gigi-readable spec file), then a SYSTEM
+    #    task stages whichever candidates actually exist in the archive.
+    $specPath = Join-Path (Split-Path -Parent $StagingDir) 'archive_pull_spec.json'
+    $stageScript = Join-Path (Split-Path -Parent $StagingDir) 'archive_pull_stage.ps1'
+    $candidates = @($GuestFileCandidates -split '\|' | Where-Object { $_ })
+    Invoke-Command @invokeArgs -ScriptBlock {
+        param($specPath, $candidates, $stageScript, $stagingDir)
+        $candidates | ConvertTo-Json -Compress | Set-Content -Path $specPath -Encoding ascii
+        $body = @'
+$spec = Get-Content SPEC_PATH -Raw | ConvertFrom-Json
+if ($spec -isnot [array]) { $spec = @($spec) }
+if (Test-Path 'STAGING_DIR') { Remove-Item 'STAGING_DIR' -Recurse -Force -ErrorAction SilentlyContinue }
+New-Item -ItemType Directory -Path 'STAGING_DIR' -Force | Out-Null
+foreach ($p in $spec) {
+    if (Test-Path $p) {
+        $dest = Join-Path 'STAGING_DIR' (Split-Path -Leaf $p)
+        Copy-Item $p $dest -Force -ErrorAction SilentlyContinue
+    }
+}
+'STAGED' | Set-Content -Path 'STAGING_DIR\_staged.txt' -Encoding ascii
+'@
+        $body = $body.Replace('SPEC_PATH', $specPath).Replace('STAGING_DIR', $stagingDir)
+        Set-Content -Path $stageScript -Value $body -Encoding ascii
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$stageScript`""
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        Register-ScheduledTask -TaskName 'SandboxArchivePull' -Action $action -Principal $principal -Force | Out-Null
+        Start-ScheduledTask -TaskName 'SandboxArchivePull'
+    } -ArgumentList $specPath, $candidates, $stageScript, $StagingDir | Out-Null
+
+    # 2. Wait for the staging marker (or timeout).
+    $marker = "$StagingDir\_staged.txt"
+    $staged = $false
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    while ($sw.Elapsed.TotalSeconds -lt 60) {
+        $staged = Invoke-Command @invokeArgs -ScriptBlock { param($p) Test-Path $p } -ArgumentList $marker
+        if ($staged) { break }
+        Start-Sleep -Seconds 1
+    }
+    Invoke-Command @invokeArgs -ScriptBlock {
+        Unregister-ScheduledTask -TaskName 'SandboxArchivePull' -Confirm:$false -ErrorAction SilentlyContinue
+    } | Out-Null
+    if (-not $staged) {
+        return [PSCustomObject]@{ VMName = $VMName; HostDestinationDir = $HostDestinationDir; Status = 'stage_timeout'; Files = @() }
+    }
+
+    # 3. Pull the staging dir to the host (same recurse pattern as dumps).
+    $sessParams = @{ VMName = $VMName }
+    if ($cred) { $sessParams['Credential'] = $cred }
+    $sess = $null
+    $files = @()
+    try {
+        $sess = New-PSSession @sessParams
+        $hasStaging = Invoke-Command -Session $sess -ScriptBlock { param($p) Test-Path $p } -ArgumentList $StagingDir
+        if ($hasStaging) {
+            Copy-Item -FromSession $sess -Path $StagingDir -Destination $HostDestinationDir -Recurse -Force
+            $copiedDir = Join-Path $HostDestinationDir (Split-Path -Leaf $StagingDir)
+            if (Test-Path $copiedDir) {
+                $files = Get-ChildItem -Path $copiedDir -File -Recurse | Where-Object { $_.Name -ne '_staged.txt' } | ForEach-Object {
+                    [PSCustomObject]@{ Filename = $_.Name; SizeBytes = $_.Length; HostPath = $_.FullName }
+                }
+            }
+        }
+        $status = 'copied'
+    }
+    catch {
+        $status = "error: $_"
+    }
+    finally {
+        if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue }
+        Invoke-Command @invokeArgs -ScriptBlock {
+            param($p, $s, $spec) Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item $s, $spec -Force -ErrorAction SilentlyContinue
+        } -ArgumentList $StagingDir, $stageScript, $specPath | Out-Null
+    }
+
+    return [PSCustomObject]@{
+        VMName             = $VMName
+        HostDestinationDir = $HostDestinationDir
+        Status             = $status
+        Files              = $files
+    }
+}
+
 function Copy-DroppedFilesFromVM {
     <#
     .SYNOPSIS
@@ -1717,6 +1846,209 @@ function Recapture-SandboxSnapshot {
     return [PSCustomObject]@{ VMName = $VMName; SnapshotName = $SnapshotName; Status = "recaptured" }
 }
 
+# --- Interactive console support (docs/interactive-console-streaming.md) ---
+
+function Invoke-ConsoleInputServerStart {
+    <#
+    .SYNOPSIS
+        Start the guest console-input server INSIDE the interactive session:
+        a scheduled task as the logged-on user with an interactive token.
+        PSDirect sessions are non-interactive (verified 2026-09-03), so input
+        for the visible desktop must be executed by a process in that session;
+        the server listens on the named pipe sandbox_console_in (pipes are
+        session-independent kernel objects).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VMName,
+        [Parameter(Mandatory = $false)][string]$CredentialUsername,
+        [Parameter(Mandatory = $false)][string]$CredentialPassword,
+        [Parameter(Mandatory = $false)][string]$AgentDir = "C:\SandboxAgent",
+        [Parameter(Mandatory = $false)][int]$ReadyTimeoutSeconds = 15
+    )
+
+    $scriptBlock = {
+        param($agentDir, $userName, $readyTimeout)
+        $server = Join-Path $agentDir 'console_input_server.ps1'
+        if (-not (Test-Path $server)) { throw "console_input_server.ps1 not found at $server" }
+        $ready = Join-Path $agentDir 'console_input_server.ready'
+        Remove-Item $ready -Force -ErrorAction SilentlyContinue
+
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$server`""
+        $principal = New-ScheduledTaskPrincipal -UserId $userName -LogonType Interactive -RunLevel Highest
+        Register-ScheduledTask -TaskName 'SandboxConsoleInput' -Action $action -Principal $principal -Force | Out-Null
+        Start-ScheduledTask -TaskName 'SandboxConsoleInput'
+
+        $wait = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($wait.Elapsed.TotalSeconds -lt $readyTimeout) {
+            if (Test-Path $ready) {
+                return [PSCustomObject]@{ Status = 'ready'; Task = 'SandboxConsoleInput'; ReadyFile = $ready }
+            }
+            Start-Sleep -Milliseconds 500
+        }
+        # Not ready: report task state for diagnosis (LastTaskResult nonzero = the server died at start)
+        $info = Get-ScheduledTask -TaskName 'SandboxConsoleInput' | Get-ScheduledTaskInfo
+        return [PSCustomObject]@{ Status = 'not_ready'; LastTaskResult = $info.LastTaskResult; LastRunTime = $info.LastRunTime }
+    }
+
+    $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
+    $invokeArgs = @{ VMName = $VMName; ScriptBlock = $scriptBlock; ArgumentList = @($AgentDir, $CredentialUsername, $ReadyTimeoutSeconds) }
+    if ($cred) { $invokeArgs['Credential'] = $cred }
+    return Invoke-Command @invokeArgs
+}
+
+function Invoke-ConsoleInputServerStop {
+    <#
+    .SYNOPSIS
+        Stop the guest console-input server: ask it to quit via the pipe
+        (graceful), then stop+unregister the scheduled task regardless.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VMName,
+        [Parameter(Mandatory = $false)][string]$CredentialUsername,
+        [Parameter(Mandatory = $false)][string]$CredentialPassword
+    )
+
+    $scriptBlock = {
+        try {
+            $client = New-Object System.IO.Pipes.NamedPipeClientStream('.', 'sandbox_console_in', [System.IO.Pipes.PipeDirection]::Out)
+            $client.Connect(1500)
+            $writer = New-Object System.IO.StreamWriter($client)
+            $writer.AutoFlush = $true
+            $writer.WriteLine('{"action":"quit"}')
+            $writer.Flush(); Start-Sleep -Milliseconds 300
+            $writer.Dispose(); $client.Dispose()
+        } catch { }
+        Stop-ScheduledTask -TaskName 'SandboxConsoleInput' -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName 'SandboxConsoleInput' -Confirm:$false -ErrorAction SilentlyContinue
+        return [PSCustomObject]@{ Status = 'stopped' }
+    }
+
+    $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
+    $invokeArgs = @{ VMName = $VMName; ScriptBlock = $scriptBlock }
+    if ($cred) { $invokeArgs['Credential'] = $cred }
+    return Invoke-Command @invokeArgs
+}
+
+function Invoke-SampleExecutionInteractive {
+    <#
+    .SYNOPSIS
+        Launch the sample on the VISIBLE console session via a scheduled task
+        (interactive token as the logged-on user), so UI-driven samples
+        (message boxes, installers) render on the desktop the browser console
+        shows. Mirrors Invoke-SampleExecution's result shape so executor.py
+        treats it interchangeably, with two deliberate differences:
+        process dumps are not taken (documented gap) and stdout/stderr are
+        captured to files by the guest launcher (agent/windows/
+        interactive_launcher.ps1) and read back here.
+        Blocks until the sample exits or the timeout kills it, exactly like
+        Invoke-SampleExecution.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)][string]$VMName,
+        [Parameter(Mandatory = $false)][string]$SamplePathInVM,
+        [Parameter(Mandatory = $false)][string]$LauncherPath,
+        [Parameter(Mandatory = $false)][string]$LauncherArguments,
+        [Parameter(Mandatory = $false)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $false)][int]$TimeoutSeconds = 120,
+        [Parameter(Mandatory = $false)][switch]$BehavioralTracing,
+        [Parameter(Mandatory = $false)][string]$MonitorDllPath,
+        [Parameter(Mandatory = $false)][string]$MonitorLoaderPath,
+        [Parameter(Mandatory = $false)][string]$MonitorPidFile,
+        [Parameter(Mandatory = $false)][string]$AgentDir = "C:\SandboxAgent",
+        [Parameter(Mandatory = $false)][string]$CredentialUsername,
+        [Parameter(Mandatory = $false)][string]$CredentialPassword
+    )
+
+    $scriptBlock = {
+        param($launcherPath, $arguments, $workingDirectory, $timeoutSeconds, $behavioralTracing, $monitorDllPath, $monitorLoaderPath, $monitorPidFile, $agentDir, $userName)
+
+        # Local copy (Invoke-SampleExecution's identically-named helper is
+        # scoped to ITS guest scriptblock; scriptblocks share nothing).
+        function Format-CapturedOutput($text, $max) {
+            if ($null -eq $text) { return "" }
+            if ($text.Length -gt $max) {
+                return $text.Substring(0, $max) + "`n...(truncated, $($text.Length) total chars)"
+            }
+            return $text
+        }
+
+        $runDir = Join-Path $agentDir 'interactive_run'
+        if (Test-Path $runDir) { Remove-Item $runDir -Recurse -Force -ErrorAction SilentlyContinue }
+        New-Item -ItemType Directory -Force -Path $runDir | Out-Null
+        $launcherScript = Join-Path $agentDir 'interactive_launcher.ps1'
+        if (-not (Test-Path $launcherScript)) { throw "interactive_launcher.ps1 not found at $launcherScript" }
+
+        # Spec file, not task command line: arbitrary sample arguments survive
+        # scheduled-task quoting untouched.
+        $spec = [PSCustomObject]@{
+            launcher_path       = $launcherPath
+            arguments           = $arguments
+            working_directory   = $workingDirectory
+            timeout_seconds     = $timeoutSeconds
+            behavioral_tracing  = [bool]$behavioralTracing
+            monitor_dll_path    = $monitorDllPath
+            monitor_loader_path = $monitorLoaderPath
+            monitor_pid_file    = $monitorPidFile
+        }
+        $spec | ConvertTo-Json -Compress | Set-Content -Path (Join-Path $runDir 'launch_spec.json') -Encoding ascii
+
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcherScript`" -WorkDir `"$runDir`""
+        $principal = New-ScheduledTaskPrincipal -UserId $userName -LogonType Interactive -RunLevel Highest
+        Register-ScheduledTask -TaskName 'SandboxInteractiveRun' -Action $action -Principal $principal -Force | Out-Null
+        Start-ScheduledTask -TaskName 'SandboxInteractiveRun'
+
+        $resultPath = Join-Path $runDir 'launch_result.json'
+        $stdoutPath = Join-Path $runDir 'stdout.txt'
+        $stderrPath = Join-Path $runDir 'stderr.txt'
+        try {
+            $deadline = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not (Test-Path $resultPath) -and $deadline.Elapsed.TotalSeconds -lt ($timeoutSeconds + 60)) {
+                Start-Sleep -Seconds 1
+            }
+            if (-not (Test-Path $resultPath)) {
+                throw "interactive launcher produced no result within $($timeoutSeconds + 60)s"
+            }
+            $result = Get-Content $resultPath -Raw | ConvertFrom-Json
+            $stdoutText = if (Test-Path $stdoutPath) { [System.IO.File]::ReadAllText($stdoutPath) } else { '' }
+            $stderrText = if (Test-Path $stderrPath) { [System.IO.File]::ReadAllText($stderrPath) } else { '' }
+            if ($result.TimedOut) { $stderrText = "Process did not exit within timeout`n" + $stderrText }
+
+            return [PSCustomObject]@{
+                ProcessId               = $result.ProcessId
+                Started                 = $true
+                Path                    = $launcherPath
+                LauncherPath            = $launcherPath
+                ExitCode                = $result.ExitCode
+                Stdout                  = Format-CapturedOutput $stdoutText 65536
+                Stderr                  = Format-CapturedOutput $stderrText 65536
+                TimedOut                = [bool]$result.TimedOut
+                ProcessDumps            = @()
+                BehavioralTracingActive = [bool]$result.BehavioralTracingActive
+                Interactive             = $true
+            }
+        } finally {
+            Stop-ScheduledTask -TaskName 'SandboxInteractiveRun' -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName 'SandboxInteractiveRun' -Confirm:$false -ErrorAction SilentlyContinue
+        }
+    }
+
+    $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
+    $invokeArgs = @{
+        VMName      = $VMName
+        ScriptBlock = $scriptBlock
+        ArgumentList = @($LauncherPath, $LauncherArguments, $WorkingDirectory, $TimeoutSeconds,
+                         $BehavioralTracing.IsPresent, $MonitorDllPath, $MonitorLoaderPath, $MonitorPidFile,
+                         $AgentDir, $CredentialUsername)
+    }
+    if ($cred) { $invokeArgs['Credential'] = $cred }
+    return Invoke-Command @invokeArgs
+}
+
 # --- Entrypoint for CLI usage from Python orchestrator ---
 if ($args.Count -gt 0) {
     $command = $args[0]
@@ -1750,9 +2082,13 @@ if ($args.Count -gt 0) {
         "Get-Thumbnail"           { Get-SandboxVMThumbnail @remainingArgs | ConvertTo-Json }
         "Copy-ProcessDumps"       { Copy-ProcessDumpsFromVM @remainingArgs | ConvertTo-Json -Depth 5 }
         "Copy-DroppedFiles"       { Copy-DroppedFilesFromVM @remainingArgs | ConvertTo-Json -Depth 5 }
+        "Copy-SandboxArchive"     { Copy-SandboxArchiveFromVM @remainingArgs | ConvertTo-Json -Depth 5 }
         "Invoke-GuestPython"      { Invoke-GuestPython @remainingArgs | ConvertTo-Json -Depth 5 }
         "Restart-Guest"           { Restart-SandboxGuest @remainingArgs | ConvertTo-Json }
         "Recapture-Snapshot"      { Recapture-SandboxSnapshot @remainingArgs | ConvertTo-Json }
+        "Console-InputServer-Start" { Invoke-ConsoleInputServerStart @remainingArgs | ConvertTo-Json }
+        "Console-InputServer-Stop"  { Invoke-ConsoleInputServerStop @remainingArgs | ConvertTo-Json }
+        "Execute-Sample-Interactive" { Invoke-SampleExecutionInteractive @remainingArgs | ConvertTo-Json -Depth 5 }
         default                   { throw "Unknown command: $command" }
     }
 }

@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from orchestrator import detectors
+from orchestrator.pid_lineage import _parse_sysmon_time
 
 # Event types that are alert-worthy regardless of their field values -- either
 # already narrow/inherently suspicious (CreateRemoteThread, ProcessTampering),
@@ -83,10 +84,23 @@ _STANDARD_LOAD_PATH_PREFIXES = (
 SYNTHETIC_EVENT_ID_PROCESS_BURST = 9101
 SYNTHETIC_EVENT_ID_DUMP_YARA_MATCH = 9103
 SYNTHETIC_EVENT_ID_DROPPED_FILE_YARA_MATCH = 9104
+SYNTHETIC_EVENT_ID_NETWORK_BURST = 9105
+SYNTHETIC_EVENT_ID_DROPPED_FILE_CAPA_HIT = 9106
 
 SHORT_LIVED_THRESHOLD_SECONDS = 0.5
 PROCESS_BURST_WINDOW_SECONDS = 2.0
 PROCESS_BURST_MIN_COUNT = 3
+
+# Network burst thresholds (Sysmon EID 3 NetworkConnect / EID 22 DnsQuery).
+# Baseline volume on a normal run is ~59 connects / ~24 DNS queries TOTAL
+# across all processes over the whole run, so a per-PID count inside a 10s
+# window at these levels is well outside routine OS chatter.
+NETWORK_BURST_WINDOW_SECONDS = 10.0
+CONN_FLOOD_MIN_COUNT = 40
+PORT_SCAN_MIN_DISTINCT_PORTS = 15
+DNS_FLOOD_MIN_COUNT = 50
+DNS_TUNNEL_MIN_QUERIES = 20
+DNS_TUNNEL_AVG_NAME_LENGTH = 52  # DNS label cap is 63; legit names avg far below
 
 
 def _is_unusual_load(data: Dict[str, Any]) -> bool:
@@ -291,7 +305,47 @@ def detect_dropped_file_yara_matches(dropped_files: Optional[Dict[str, Any]]) ->
     return alerts
 
 
-def detect_defender_threats(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def detect_dropped_file_capa_hits(dropped_files: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One alert per high-signal capa capability found in a dropped/archived
+    file's deep static re-analysis (executor.py::_analyze_retrieved_file runs
+    capa selectively on flagged PE dropped files). Same shape as
+    detect_dropped_file_yara_matches().
+    """
+    if not dropped_files or not dropped_files.get("enabled"):
+        return []
+    alerts = []
+    for item in dropped_files.get("items") or []:
+        capa = item.get("capa") or {}
+        if not capa.get("available"):
+            continue
+        for cap in capa.get("capabilities") or []:
+            if not cap.get("high_signal"):
+                continue
+            name = cap.get("name") or "unknown"
+            filename = item.get("filename")
+            alerts.append(
+                {
+                    "source": "heuristic",
+                    "provider_name": "SandboxHeuristics",
+                    "event_id": SYNTHETIC_EVENT_ID_DROPPED_FILE_CAPA_HIT,
+                    "event_type": "DroppedFileCapaHit",
+                    "timestamp": None,
+                    "in_sample_scope": True,  # lineage-scoped by construction
+                    "data": {
+                        "Capability": name,
+                        "Namespace": cap.get("namespace"),
+                        "DroppedFilename": filename,
+                        "OriginalPath": item.get("original_path"),
+                        "Origin": item.get("origin") or "created",
+                        "Type": f"capa high-signal capability '{name}' in dropped file {filename}",
+                    },
+                }
+            )
+    return alerts
+
+
+def detect_defender_threats(events: List[Dict[str, Any]],
+                            sample_start: Optional[datetime] = None) -> List[Dict[str, Any]]:
     """One alert per distinct Microsoft Defender threat detection (EID 1116).
 
     Defender is an active sensor in this sandbox (it also backs the AMSI
@@ -307,6 +361,14 @@ def detect_defender_threats(events: List[Dict[str, Any]]) -> List[Dict[str, Any]
     only the sample, so any Defender detection during the run is the sample's,
     and the event carries no ProcessId to infer scope from anyway (Process Name
     is "Unknown"; the offending command line is in the Path field).
+
+    Exception: Virus:Win32/MpTest!amsi matches ONLY the canonical AMSI test
+    string, and our defender-readiness probe fires it pre-sample on every run
+    (executor's defender_ready step). When sample_start is known, MpTest
+    detections BEFORE the sample's own ProcessCreate are dropped as tooling;
+    detections at/after it are kept -- a sample that deliberately prints the
+    test string (amsi_detection.ps1) still scores. When sample_start is
+    unknown, all MpTest detections are dropped (conservative FP direction).
     """
     alerts: List[Dict[str, Any]] = []
     seen = set()
@@ -314,6 +376,10 @@ def detect_defender_threats(events: List[Dict[str, Any]]) -> List[Dict[str, Any]
         if (event.get("event_type") or event.get("EventType")) != "DefenderThreatDetected":
             continue
         data = event.get("data") or {}
+        if "mptest" in str(data.get("Threat Name") or "").lower():
+            det = _parse_sysmon_time(data.get("Detection Time") or event.get("timestamp"))
+            if sample_start is None or det is None or det < sample_start:
+                continue  # our own AMSI readiness probe (see docstring)
         key = (data.get("Threat Name"), data.get("Path"))
         if key in seen:
             continue
@@ -332,6 +398,151 @@ def detect_defender_threats(events: List[Dict[str, Any]]) -> List[Dict[str, Any]
     return alerts
 
 
+def _detect_network_bursts(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flag per-process network activity spikes in Sysmon EID 3/22:
+
+    - port_scan: many DISTINCT DestinationPorts against one DestinationIp in a
+      short window (port scanning -- distinct-value counting, which a Sigma
+      event_count correlation cannot express);
+    - connection_flood: sheer connect volume in a window (DDoS/exfil churn);
+    - dns_flood: sheer DNS query volume in a window;
+    - dns_tunnel_suspect: elevated query volume AND unusually long average
+      QueryName (data encoded into labels, T1071.004/T1572).
+
+    The per-event NetworkConnect/DnsQuery alerts stay unconditional -- this
+    adds one synthesized summary alert per burst on top.
+    """
+    connects: Dict[str, List[Tuple[datetime, str, str]]] = defaultdict(list)
+    queries: Dict[str, List[Tuple[datetime, str]]] = defaultdict(list)
+    for event in events:
+        event_type = event.get("event_type") or event.get("EventType")
+        if event_type not in ("NetworkConnect", "DnsQuery"):
+            continue
+        data = event.get("data") or {}
+        pid = data.get("ProcessId")
+        if pid is None:
+            continue
+        ts = _parse_iso(event.get("timestamp") or data.get("UtcTime"))
+        if ts is None:
+            continue
+        pid_key = str(pid)
+        if event_type == "NetworkConnect":
+            if (data.get("Initiated") or "true").strip().lower() != "true":
+                continue  # inbound-only noise is not a sample-driven burst
+            connects[pid_key].append(
+                (ts, str(data.get("DestinationIp") or ""), str(data.get("DestinationPort") or ""))
+            )
+        else:
+            queries[pid_key].append((ts, str(data.get("QueryName") or "")))
+
+    alerts = []
+
+    for pid, rows in connects.items():
+        rows.sort(key=lambda r: r[0])
+        window = _densest_window([r[0] for r in rows], NETWORK_BURST_WINDOW_SECONDS)
+        if window is None:
+            continue
+        i, j, count = window
+        win_rows = rows[i : j + 1]
+        last_ts = win_rows[-1][0]
+
+        # Port scan: per (pid, dest ip), count distinct ports in the window.
+        by_dest: Dict[str, set] = defaultdict(set)
+        for _, ip, port in win_rows:
+            if ip and port:
+                by_dest[ip].add(port)
+        scanned = {ip: ports for ip, ports in by_dest.items() if len(ports) >= PORT_SCAN_MIN_DISTINCT_PORTS}
+        for ip, ports in sorted(scanned.items()):
+            alerts.append(
+                {
+                    "source": "heuristic",
+                    "provider_name": "SandboxHeuristics",
+                    "event_id": SYNTHETIC_EVENT_ID_NETWORK_BURST,
+                    "event_type": "NetworkBurstDetected",
+                    "timestamp": last_ts.isoformat(),
+                    "data": {
+                        "UtcTime": last_ts.isoformat(),
+                        "ProcessId": pid,
+                        "Type": f"Port scan: {len(ports)} distinct destination ports on {ip} within {NETWORK_BURST_WINDOW_SECONDS:g}s",
+                        "BurstKind": "port_scan",
+                        "DestinationIp": ip,
+                        "Count": len(ports),
+                        "WindowSeconds": NETWORK_BURST_WINDOW_SECONDS,
+                        "SamplePorts": sorted(ports, key=lambda p: int(p) if p.isdigit() else 0)[:10],
+                    },
+                }
+            )
+
+        if count >= CONN_FLOOD_MIN_COUNT and not scanned:
+            dests = [ip for _, ip, _ in win_rows if ip]
+            top = sorted({ip: dests.count(ip) for ip in set(dests)}.items(), key=lambda kv: -kv[1])[:5]
+            alerts.append(
+                {
+                    "source": "heuristic",
+                    "provider_name": "SandboxHeuristics",
+                    "event_id": SYNTHETIC_EVENT_ID_NETWORK_BURST,
+                    "event_type": "NetworkBurstDetected",
+                    "timestamp": last_ts.isoformat(),
+                    "data": {
+                        "UtcTime": last_ts.isoformat(),
+                        "ProcessId": pid,
+                        "Type": f"Connection flood: {count} outbound connections within {NETWORK_BURST_WINDOW_SECONDS:g}s",
+                        "BurstKind": "connection_flood",
+                        "Count": count,
+                        "WindowSeconds": NETWORK_BURST_WINDOW_SECONDS,
+                        "TopDestinations": [f"{ip} ({n})" for ip, n in top],
+                    },
+                }
+            )
+
+    for pid, rows in queries.items():
+        rows.sort(key=lambda r: r[0])
+        window = _densest_window([r[0] for r in rows], NETWORK_BURST_WINDOW_SECONDS)
+        if window is None:
+            continue
+        i, j, count = window
+        win_names = [r[1] for r in rows[i : j + 1] if r[1]]
+        if not win_names:
+            continue
+        last_ts = rows[j][0]
+        avg_len = sum(len(n) for n in win_names) / len(win_names)
+        unique_ratio = len(set(win_names)) / len(win_names)
+
+        kind = None
+        if count >= DNS_TUNNEL_MIN_QUERIES and avg_len >= DNS_TUNNEL_AVG_NAME_LENGTH and unique_ratio >= 0.8:
+            kind = "dns_tunnel_suspect"
+            summary = (
+                f"DNS tunneling suspected: {count} queries within {NETWORK_BURST_WINDOW_SECONDS:g}s, "
+                f"avg name length {avg_len:.0f} chars, {unique_ratio:.0%} unique"
+            )
+        elif count >= DNS_FLOOD_MIN_COUNT:
+            kind = "dns_flood"
+            summary = f"DNS query flood: {count} queries within {NETWORK_BURST_WINDOW_SECONDS:g}s"
+        if kind is None:
+            continue
+        alerts.append(
+            {
+                "source": "heuristic",
+                "provider_name": "SandboxHeuristics",
+                "event_id": SYNTHETIC_EVENT_ID_NETWORK_BURST,
+                "event_type": "NetworkBurstDetected",
+                "timestamp": last_ts.isoformat(),
+                "data": {
+                    "UtcTime": last_ts.isoformat(),
+                    "ProcessId": pid,
+                    "Type": summary,
+                    "BurstKind": kind,
+                    "Count": count,
+                    "WindowSeconds": NETWORK_BURST_WINDOW_SECONDS,
+                    "AvgQueryNameLength": round(avg_len, 1),
+                    "SampleQueryNames": win_names[:5],
+                },
+            }
+        )
+
+    return alerts
+
+
 def detect_bursts(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Synthesize pseudo-alerts for behavioral patterns spanning multiple
     events (bursts), which select_alert_events's per-event predicate can't see.
@@ -343,8 +554,11 @@ def detect_bursts(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     ProcessTerminate < 0.5s later for the SAME process -- which a single-type
     event_count correlation can't express (it would need to correlate two
     different event types about the same entity and measure their gap).
+    Network bursts stay here for the same reason: port-scan detection needs
+    distinct-port counting per destination, and DNS-tunneling needs per-query
+    name statistics -- neither is expressible as a Sigma event_count rule.
     """
-    return _detect_process_bursts(events)
+    return _detect_process_bursts(events) + _detect_network_bursts(events)
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +734,24 @@ def describe_detectors() -> List[Dict[str, Any]]:
                 "(rapid process churn)."
             ),
             "detail": ["ProcessBurstDetected"],
+        },
+        {
+            "id": "heuristic.network-burst",
+            "family": detectors.FAMILY_HEURISTIC,
+            "name": "Network burst (scan/flood/DNS-tunnel)",
+            "severity": "medium",
+            "kind": "sequence",
+            "mitre": ["T1046", "T1071.004", "T1572"],
+            "description": (
+                f"Synthetic alert when one process exceeds network activity "
+                f"thresholds inside {NETWORK_BURST_WINDOW_SECONDS:g}s: "
+                f">= {PORT_SCAN_MIN_DISTINCT_PORTS} distinct ports to one host "
+                f"(port scan), >= {CONN_FLOOD_MIN_COUNT} connections "
+                f"(flood), >= {DNS_FLOOD_MIN_COUNT} DNS queries (flood), or "
+                f">= {DNS_TUNNEL_MIN_QUERIES} mostly-unique queries averaging "
+                f">= {DNS_TUNNEL_AVG_NAME_LENGTH} chars (DNS tunneling)."
+            ),
+            "detail": ["NetworkBurstDetected"],
         },
         {
             "id": "heuristic.priority-annotation",

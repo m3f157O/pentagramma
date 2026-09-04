@@ -56,6 +56,7 @@ STATIC_YARA_MATCH_WEIGHT = 15
 # contributes a modest, once-only bump -- not per-capability, to avoid a
 # capability-rich binary inflating the score by volume.
 STATIC_CAPA_SIGNAL_WEIGHT = 8
+STATIC_DOTNET_OBFUSCATOR_WEIGHT = 5
 
 # Microsoft Defender's SeverityName -> our severity vocabulary. A Defender
 # threat detection (EID 1116) is a confirmed AV catch, scored via the same
@@ -222,6 +223,26 @@ def classify_alert(alert: Dict[str, Any]) -> Optional[AlertClassification]:
         rule = (alert.get("data") or {}).get("Rule") or "unknown rule"
         return AlertClassification(FAMILY_YARA, "high", YARA_MATCH_WEIGHT, f"yara:{rule}", f"YARA match: {rule}")
 
+    if event_type == "DroppedFileCapaHit":
+        data = alert.get("data") or {}
+        cap_name = data.get("Capability") or "unknown"
+        origin = data.get("Origin") or "created"
+        return AlertClassification(
+            FAMILY_HEURISTIC, "medium", SEVERITY_WEIGHTS["medium"],
+            f"capa-dropped:{origin}:{data.get('DroppedFilename') or ''}:{cap_name}",
+            data.get("Type") or event_type,
+        )
+
+    if event_type == "NetworkBurstDetected":
+        data = alert.get("data") or {}
+        kind = data.get("BurstKind") or ""
+        severity = "high" if kind in ("port_scan", "dns_tunnel_suspect") else "medium"
+        return AlertClassification(
+            FAMILY_HEURISTIC, severity, SEVERITY_WEIGHTS[severity],
+            f"netburst:{kind}:{data.get('ProcessId') or ''}",
+            data.get("Type") or event_type,
+        )
+
     if event_type == "DefenderThreatDetected":
         data = alert.get("data") or {}
         threat = data.get("Threat Name") or "unknown threat"
@@ -308,4 +329,8 @@ def classify_static(static_analysis: Optional[Dict[str, Any]]) -> List[Dict[str,
         if high:
             names = ", ".join(c.get("name", "?") for c in high[:3])
             out.append({"weight": STATIC_CAPA_SIGNAL_WEIGHT, "label": f"capa high-signal capability: {names}"})
+    dotnet = ((sa.get("pe") or {}).get("dotnet") or {})
+    if dotnet.get("obfuscator_suspected"):
+        markers = ", ".join(dotnet.get("obfuscator_markers", [])[:3])
+        out.append({"weight": STATIC_DOTNET_OBFUSCATOR_WEIGHT, "label": f".NET obfuscator/packer markers: {markers}"})
     return out

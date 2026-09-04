@@ -125,6 +125,12 @@ EVENT_TYPE_TO_MITRE: Dict[str, List[Dict[str, str]]] = {
     "DnsQuery": [
         {"technique_id": "T1071.004", "technique_name": "Application Layer Protocol: DNS", "tactic": "Command and Control"},
     ],
+    "NetworkBurstDetected": [
+        {"technique_id": "T1046", "technique_name": "Network Service Discovery", "tactic": "Discovery"},
+        {"technique_id": "T1071.004", "technique_name": "Application Layer Protocol: DNS", "tactic": "Command and Control"},
+        {"technique_id": "T1572", "technique_name": "Protocol Tunneling", "tactic": "Command and Control"},
+        {"technique_id": "T1048", "technique_name": "Exfiltration Over Alternative Protocol", "tactic": "Exfiltration"},
+    ],
     "DmpYaraMatch": [
         {"technique_id": "T1027", "technique_name": "Obfuscated/Compressed Files or Information", "tactic": "Defense Evasion"},
     ],

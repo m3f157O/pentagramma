@@ -8,11 +8,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
 
-from orchestrator import behavioral_signatures, cape_engine as cape_engine_mod, harness_validation, heuristics, jobs, local_trace, pcap_view, report_view, sample_types, static_analysis
+from orchestrator import behavioral_signatures, cape_engine as cape_engine_mod, console, harness_validation, heuristics, jobs, local_trace, pcap_view, report_view, sample_types, static_analysis
 from orchestrator.config import get_config
 from orchestrator.executor import SandboxExecutor
 from orchestrator.hyperv import HyperVManager
@@ -36,6 +36,13 @@ def _local_trace() -> local_trace.LocalTraceManager:
     if _local_trace_mgr is None:
         _local_trace_mgr = local_trace.LocalTraceManager(_cfg())
     return _local_trace_mgr
+
+
+def _console() -> console.ConsoleManager:
+    """The singleton interactive-console manager (see orchestrator/console.py)."""
+    mgr = console.get_console_manager(_cfg())
+    assert mgr is not None
+    return mgr
 
 
 # Shared config and helpers (created per request to keep it simple)
@@ -643,6 +650,7 @@ def analyze_sample(
     dll_entry_point: Optional[str] = Form(None, description="DLL export to invoke via rundll32 if ambiguous"),
     archive_entry: Optional[str] = Form(None, description="Which file to run from a multi-file ZIP"),
     archive_password: Optional[str] = Form(None, description="ZIP password, if encrypted"),
+    interactive: Optional[bool] = Form(None, description="Run the sample on the visible console session (interactive mode)"),
 ) -> Dict[str, Any]:
     """
     Submit a sample (file upload) or a URL and run it inside the existing
@@ -675,6 +683,7 @@ def analyze_sample(
         report = executor.run_analysis(
             arguments=arguments or "",
             timeout_seconds=timeout,
+            interactive=bool(interactive),
             **plan_kwargs,
         )
     except Exception as exc:
@@ -696,6 +705,7 @@ def submit_job(
     dll_entry_point: Optional[str] = Form(None, description="DLL export to invoke via rundll32 if ambiguous"),
     archive_entry: Optional[str] = Form(None, description="Which file to run from a multi-file ZIP"),
     archive_password: Optional[str] = Form(None, description="ZIP password, if encrypted"),
+    interactive: Optional[bool] = Form(None, description="Run the sample on the visible console session (interactive mode)"),
 ) -> Dict[str, Any]:
     """
     Submit a sample (file upload) or a URL and run it asynchronously.
@@ -720,6 +730,7 @@ def submit_job(
         config=cfg,
         arguments=arguments or "",
         timeout_seconds=timeout,
+        interactive=bool(interactive),
         **plan_kwargs,
     )
 
@@ -736,6 +747,55 @@ def get_job(job_id: str) -> Dict[str, Any]:
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
+
+
+# ---------------------------------------------------------------------------
+# Interactive browser console (docs/interactive-console-streaming.md)
+# ---------------------------------------------------------------------------
+# On-demand live view (~1 fps WMI thumbnails, zero guest footprint) + input
+# injection into the VM's visible console session. Opt-in: nothing here runs
+# unless the console is explicitly opened. Opening it during a run tags the
+# report (interactive_console: true) -- interaction changes the detonation.
+
+@app.post("/api/console/open")
+def console_open() -> Dict[str, Any]:
+    try:
+        return _console().open()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/console/close")
+def console_close() -> Dict[str, Any]:
+    return _console().close()
+
+
+@app.get("/api/console/status")
+def console_status() -> Dict[str, Any]:
+    return _console().status()
+
+
+@app.get("/api/console/frame")
+def console_frame() -> Response:
+    try:
+        data, frame_id = _console().frame()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store", "X-Frame-Id": str(frame_id)},
+    )
+
+
+@app.post("/api/console/input")
+def console_input(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return _console().input(payload)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/api/reports/list")
@@ -902,14 +962,17 @@ def run_guardian(action: str) -> Dict[str, Any]:
     ELEVATED for VM stages (Hyper-V PSDirect).
 
     Actions: build (compile+sign the driver, host-side), load / test /
-    cleanup (the repeatable A1a functional flow), and the one-time A0 spike
-    stages spike-inspect / spike-enable / spike-load / spike-diag /
-    spike-cleanup.
+    cleanup (the repeatable A1a functional flow), provision (bake the driver
+    into the golden snapshot), verifier-soak (A4: Driver Verifier standard
+    flags on SandboxGuard.sys + A1a battery, then restores the snapshot so
+    normal runs stay verifier-free), and the one-time A0 spike stages
+    spike-inspect / spike-enable / spike-load / spike-diag / spike-cleanup.
 
     Returns immediately with a job record; poll GET /api/jobs/{job_id}.
-    For action=test the job's report_status is "all_pass" | "checks_failed"
-    and the script output tail is on the record's "output" field. Shares the
-    single-flight VM slot with /api/jobs and /api/harness/run.
+    For action=test/verifier-soak the job's report_status is "all_pass" |
+    "checks_failed" and the script output tail is on the record's "output"
+    field. Shares the single-flight VM slot with /api/jobs and
+    /api/harness/run.
     """
     try:
         job = jobs.submit_guardian_job(action)

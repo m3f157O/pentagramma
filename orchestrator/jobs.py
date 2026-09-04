@@ -43,6 +43,7 @@ GUARDIAN_SIGN_SCRIPT = GUARDIAN_DIR / "make_test_cert.ps1"
 GUARDIAN_SPIKE_SCRIPT = GUARDIAN_DIR / "guardian_spike.ps1"
 GUARDIAN_A1_SCRIPT = GUARDIAN_DIR / "guardian_a1_test.ps1"
 GUARDIAN_PROVISION_SCRIPT = GUARDIAN_DIR / "install_guardian.ps1"
+GUARDIAN_SOAK_SCRIPT = GUARDIAN_DIR / "guardian_verifier_soak.ps1"
 
 # POST /api/guardian/run actions -> (script, args, timeout_s). "build" is
 # special-cased (build + sign, two scripts). Spike stages are the one-time
@@ -59,6 +60,7 @@ GUARDIAN_ACTIONS = {
     "test": (GUARDIAN_A1_SCRIPT, ["-Stage", "test"], 600),
     "cleanup": (GUARDIAN_A1_SCRIPT, ["-Stage", "cleanup"], 300),
     "provision": (GUARDIAN_PROVISION_SCRIPT, [], 1800),
+    "verifier-soak": (GUARDIAN_SOAK_SCRIPT, [], 1800),
 }
 
 _lock = threading.Lock()
@@ -249,6 +251,7 @@ def submit_analysis_job(
     url_mode: Optional[str] = None,
     execution_error: Optional[str] = None,
     execution_error_detail: Optional[Any] = None,
+    interactive: bool = False,
 ) -> Dict[str, Any]:
     """Run SandboxExecutor.run_analysis in a background thread -- immediately
     if the VM is idle, or queued (FIFO) behind whatever is already active.
@@ -289,6 +292,7 @@ def submit_analysis_job(
         url_mode=url_mode,
         execution_error=execution_error,
         execution_error_detail=execution_error_detail,
+        interactive=interactive,
     )
 
     start_now = False
@@ -323,6 +327,7 @@ def _run_analysis_job(
     url_mode: Optional[str] = None,
     execution_error: Optional[str] = None,
     execution_error_detail: Optional[Any] = None,
+    interactive: bool = False,
 ) -> None:
     update_job(job_id, status="running", started_at=_now_iso())
     executor = SandboxExecutor(config)
@@ -346,6 +351,7 @@ def _run_analysis_job(
             url_mode=url_mode,
             execution_error=execution_error,
             execution_error_detail=execution_error_detail,
+            interactive=interactive,
         )
         update_job(
             job_id,
@@ -510,7 +516,7 @@ def _run_guardian_job(job_id: str, action: str) -> None:
             fields["error"] = out[-2000:] or f"guardian action '{action}' failed"
         else:
             fields["status"] = "completed"
-            if action == "test":
+            if action in ("test", "verifier-soak"):
                 fields["report_status"] = "checks_failed" if "[FAIL]" in out else "all_pass"
         update_job(job_id, **fields)
     except subprocess.TimeoutExpired:

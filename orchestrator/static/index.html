@@ -17,6 +17,7 @@
       <a href="rules.html">Rules</a>
       <a href="harness.html">Injection Harness</a>
       <a href="architecture.html">Architecture</a>
+      <a href="console.html">Console</a>
     </nav>
     <div style="margin-left:auto">
       <span class="small muted">orchestrator</span>
@@ -82,6 +83,7 @@
 
         <input type="text" id="arguments" placeholder="arguments (optional)" />
         <input type="number" id="timeout" placeholder="timeout s" style="width:90px" />
+        <label class="small" title="Run the sample on the VM's visible console session so you can watch and interact with it live (Console page). The report is tagged interactive_launch and is not comparable to corpus baselines."><input type="checkbox" id="interactive" /> interactive</label>
         <button type="submit">Run in sandbox</button>
       </form>
       <div id="submit-status" class="small muted"></div>

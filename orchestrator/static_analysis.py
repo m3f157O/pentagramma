@@ -3,6 +3,7 @@
 Supports:
   - File type identification
   - PE parsing (headers, sections, imports, exports, resources)
+  - .NET/CLR metadata (assembly, typerefs, user strings, obfuscator hints)
   - String extraction (ASCII/Unicode)
   - Entropy calculation
   - YARA rule matching
@@ -245,8 +246,14 @@ class StaticAnalyzer:
     # Public API
     # ------------------------------------------------------------------
 
-    def analyze(self, file_path: str | Path) -> Dict[str, Any]:
-        """Run the full static analysis pipeline on a file."""
+    def analyze(self, file_path: str | Path, run_capa: Optional[bool] = None) -> Dict[str, Any]:
+        """Run the full static analysis pipeline on a file.
+
+        run_capa overrides the config gate: pass False to skip the capa
+        subprocess (used by the dropped-file deep-analysis pass, which runs
+        capa selectively itself since one 180s-bounded capa invocation per
+        dropped file would otherwise dominate run time).
+        """
         path = Path(file_path)
         data = path.read_bytes()
 
@@ -271,7 +278,8 @@ class StaticAnalyzer:
         # capa capability analysis (ATT&CK/MBC). Gated + timeout-bounded in
         # capa_analysis; returns {available: False, reason} for non-PE samples
         # or when rules aren't vendored, so it's always safe to include.
-        if self.capa_config.get("enabled"):
+        capa_enabled = self.capa_config.get("enabled") if run_capa is None else run_capa
+        if capa_enabled:
             result["capa"] = capa_analysis.analyze_file(path, self.capa_config)
 
         if self.vt_api_key:
@@ -415,8 +423,122 @@ class StaticAnalyzer:
                 "values": [hex(v) for v in pe.RICH_HEADER.values],
             }
 
+        # .NET / CLR metadata (data directory 14 = COM descriptor)
+        has_clr = (
+            hasattr(pe, "OPTIONAL_HEADER")
+            and len(getattr(pe.OPTIONAL_HEADER, "DATA_DIRECTORY", [])) > 14
+            and pe.OPTIONAL_HEADER.DATA_DIRECTORY[14].VirtualAddress != 0
+        )
+        if has_clr:
+            result["dotnet"] = self.parse_dotnet(path)
+
         pe.close()
         return result
+
+    # Known managed-packers/obfuscators, matched case-insensitively against
+    # TypeRef/attribute names and user strings. Deliberately short and
+    # high-precision -- this is a triage hint, not a classifier.
+    _DOTNET_OBFUSCATOR_MARKERS = [
+        "confuserex", "confuser.core", "obfuscar", "dotfuscator",
+        "smartassembly", "eazfuscator", "babel.obfuscator", "agiledotnet",
+        "net reactor", "deepsea", "phoenixprotector", "netshencode",
+    ]
+
+    _DOTNET_MAX_TYPEREFS = 200
+    _DOTNET_MAX_USER_STRINGS = 100
+
+    @staticmethod
+    def parse_dotnet(path: Path) -> Optional[Dict[str, Any]]:
+        """Extract .NET/CLR metadata with dnfile (already installed as capa's
+        .NET backend). Best-effort per section: a corrupt/obfuscated metadata
+        block degrades to whatever parsed, never an exception. Returns None
+        when dnfile is unavailable or the file has no managed metadata.
+        """
+        try:
+            import dnfile
+        except ImportError:
+            return None
+        try:
+            dn = dnfile.dnPE(str(path))
+        except Exception:
+            return None
+        try:
+            net = getattr(dn, "net", None)
+            if net is None or getattr(net, "metadata", None) is None:
+                return None
+
+            result: Dict[str, Any] = {}
+            try:
+                struct = net.struct
+                flags = int(getattr(struct, "Flags", 0))
+                result["runtime_version"] = f"{struct.MajorRuntimeVersion}.{struct.MinorRuntimeVersion}"
+                result["entry_point_token"] = hex(getattr(struct, "EntryPointTokenOrRva", 0))
+                # COMIMAGE_FLAGS_ILONLY (0x1): unset means native+IL mixed mode
+                result["mixed_mode"] = not bool(flags & 0x1)
+            except Exception as exc:
+                result["header_error"] = str(exc)
+
+            try:
+                result["metadata_streams"] = [
+                    s.struct.Name.decode("utf-8", errors="ignore")
+                    for s in net.metadata.streams_list
+                ]
+            except Exception:
+                result["metadata_streams"] = []
+
+            def _table_names(table, cap):
+                names = []
+                if table is None or not getattr(table, "rows", None):
+                    return names
+                for row in table.rows[:cap]:
+                    ns = str(getattr(row, "TypeNamespace", "") or "")
+                    name = str(getattr(row, "TypeName", "") or "")
+                    if name and name != "<Module>":
+                        names.append(f"{ns}.{name}" if ns else name)
+                return names
+
+            try:
+                mdtables = net.mdtables
+                result["type_refs"] = _table_names(getattr(mdtables, "TypeRef", None), StaticAnalyzer._DOTNET_MAX_TYPEREFS)
+                result["type_defs"] = _table_names(getattr(mdtables, "TypeDef", None), StaticAnalyzer._DOTNET_MAX_TYPEREFS)
+                asm = getattr(mdtables, "Assembly", None)
+                if asm is not None and getattr(asm, "rows", None):
+                    result["assembly_name"] = str(getattr(asm.rows[0], "Name", "") or "")
+            except Exception as exc:
+                result["tables_error"] = str(exc)
+
+            user_strings: List[str] = []
+            try:
+                us_heap = net.user_strings
+                heap_size = us_heap.sizeof()
+                offset = 1  # index 0 is the empty string
+                # A valid record needs >= 2 bytes (length prefix + trailing
+                # flag); stop before probing the heap tail so dnfile's
+                # "string missing trailing flag" warning doesn't fire.
+                while offset + 2 <= heap_size and len(user_strings) < StaticAnalyzer._DOTNET_MAX_USER_STRINGS:
+                    us = us_heap.get(offset)
+                    if us is None:
+                        break
+                    if us.value:
+                        user_strings.append(us.value)
+                    item_size = max(int(getattr(us, "item_size", 0) or 0), 1)
+                    # heap offsets advance past the compressed-length prefix
+                    # (1/2/4 bytes by size) plus the item itself.
+                    prefix = 1 if item_size < 0x80 else (2 if item_size < 0x4000 else 4)
+                    offset += prefix + item_size
+                result["user_strings"] = user_strings
+            except Exception as exc:
+                result["user_strings_error"] = str(exc)
+
+            haystack = "\n".join(
+                result.get("type_refs", []) + result.get("type_defs", []) + user_strings
+            ).lower()
+            hits = [m for m in StaticAnalyzer._DOTNET_OBFUSCATOR_MARKERS if m in haystack]
+            result["obfuscator_suspected"] = bool(hits)
+            result["obfuscator_markers"] = hits
+            return result
+        finally:
+            dn.close()  # pefile API; safe even if partially parsed
 
     # ------------------------------------------------------------------
     # String extraction
