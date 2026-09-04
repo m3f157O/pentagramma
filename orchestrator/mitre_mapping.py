@@ -219,6 +219,16 @@ def enrich_alert(alert: Dict[str, Any]) -> Dict[str, Any]:
     # can color/group them without duplicating detectors.py's severity map.
     from orchestrator.detectors import apitrace_signature_severity  # local: keeps this module dependency-light
     severity = apitrace_signature_severity(event_type)
+    if not severity:
+        # Every other alert family: reuse the verdict classifier's severity
+        # (single source of truth -- detectors.classify_alert) so the UI's
+        # severity dots/group ordering match what the verdict actually
+        # scored. Without this, e.g. NetworkBurstDetected(port_scan) scored
+        # high for the verdict but rendered as an uncolored "low" row.
+        from orchestrator.detectors import classify_alert
+        classification = classify_alert(enriched)
+        if classification:
+            severity = classification.severity
     if severity:
         enriched["severity"] = severity
     return enriched

@@ -216,6 +216,14 @@
       </div>
     </details>
 
+    <details class="section" id="sec-wmi">
+      <summary>WMI &mdash; activity &amp; persistence (ETW) (<span id="wmi-count">0</span>)</summary>
+      <div class="section-body">
+        <div class="small muted module-note">Microsoft-Windows-WMI-Activity ETW (EIDs 5857&ndash;5861) collected in-guest &mdash; covers the WMI-subscription visibility gap left by Sysmon EID 19&ndash;21 not firing on this guest. Consumer registrations (<b>WmiTemporaryConsumer</b> 5860 / <b>WmiPermanentConsumer</b> 5861) are unconditional alerts (T1546.003 WMI Event Subscription) and are always treated as sample-scoped: the VM is a clean snapshot, so a registration during the run is the sample's doing.</div>
+        <div id="wmi-browser"></div>
+      </div>
+    </details>
+
     <!-- ======================= Network ======================= -->
 
     <details class="section" id="sec-network">
@@ -310,6 +318,6 @@
   <script src="js/event_browser.js?v=3"></script>
   <script src="js/network_view.js?v=10"></script>
   <script src="js/screenshot_view.js?v=7"></script>
-  <script src="js/report_detail.js?v=27"></script>
+  <script src="js/report_detail.js?v=28"></script>
 </body>
 </html>

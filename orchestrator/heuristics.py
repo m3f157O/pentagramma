@@ -129,6 +129,17 @@ def select_alert_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         # lolbin_command_line.yml) in the phase-2 standardization pass -- they
         # are no longer selected here to avoid double-alerting.
         if event_type in UNCONDITIONAL_ALERT_TYPES:
+            if event_type in ("WmiTemporaryConsumer", "WmiPermanentConsumer"):
+                # WMI-Activity ETW events carry the WMI service host's PID in
+                # the ETW header, not the sample's -- lineage-based scope
+                # classification (pid_lineage.classify_alert_scope) would
+                # default these to environment and trim them out of the
+                # report summary. Same rationale as detect_defender_threats():
+                # the VM is a clean restored snapshot running only the
+                # sample, so a consumer registration during the run is the
+                # sample's doing by construction.
+                event = dict(event)
+                event["in_sample_scope"] = True
             selected.append(event)
         elif event_type in _CONDITIONAL_LOAD_TYPES and _is_unusual_load(data):
             selected.append(event)

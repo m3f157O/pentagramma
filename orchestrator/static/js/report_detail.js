@@ -92,6 +92,8 @@ function renderHeader() {
   document.getElementById("report-meta").innerHTML = `
     <span class="badge ${statusClass}">${escapeHtml(report.status)}</span>
     ${sample.sample_type ? `<span class="badge neutral">${escapeHtml(sample.sample_type)}</span>` : ""}
+    ${report.interactive_launch ? '<span class="badge warn" title="Run on the VM\'s visible console session (per-job opt-in) -- behavior differs from corpus runs">interactive launch</span>' : ""}
+    ${report.interactive_console ? '<span class="badge warn" title="The browser console was open during this run -- analyst input may have altered the detonation">interactive console</span>' : ""}
     <span class="small muted">${fmtDate(report.timestamp)}</span>
     <span class="small muted">VM ${escapeHtml(env.vm_name || "-")} (${escapeHtml(env.vm_ip || "no ip")})</span>
     ${report.error ? `<div class="error-text small">${escapeHtml(report.error)}</div>` : ""}
@@ -1094,6 +1096,7 @@ function renderDroppedFiles() {
 
 function renderIocSummary() {
   const ioc = report.ioc_summary || {};
+  const triage = networkTriageMap();
 
   const connections = ioc.network_connections || [];
   const domains = ioc.domains || [];
@@ -1116,7 +1119,13 @@ function renderIocSummary() {
   document.getElementById("ioc-domains-count").textContent = domains.length;
   document.getElementById("ioc-domains-body").innerHTML = list(
     domains,
-    (d) => `<li class="mono small">${escapeHtml(d)}</li>`,
+    (d) => {
+      const t = triage.get(String(d).replace(/\.$/, "").toLowerCase());
+      const badge = t && t.priority === "high"
+        ? ` <span class="badge bad" title="${escapeHtml(t.reason)}">DGA-suspect</span>`
+        : "";
+      return `<li class="mono small">${escapeHtml(d)}${badge}</li>`;
+    },
     "none observed"
   );
 
@@ -1332,12 +1341,49 @@ const FILE_EVENT_TYPES = ["FileCreateTime", "FileCreate", "FileCreateStreamHash"
 const REGISTRY_EVENT_TYPES = ["RegistryCreateDelete", "RegistryValueSet", "RegistryKeyValueRename"];
 const PROCESS_EVENT_TYPES = ["ProcessCreate", "ProcessTerminate"];
 const NETWORK_EVENT_TYPES = ["NetworkConnect", "DnsQuery"];
+
+// Network triage map: hostname -> {priority, reason}, built once from the
+// sample-scoped alerts (heuristics.annotate_priority raises DGA-suspect
+// domains to high, lowers known OS noise). Used to badge the IOC Domains
+// list and the Sysmon network-events browser so the triage verdict is
+// visible in the Network tab, not just on alert rows.
+let _networkTriage = null;
+function networkTriageMap() {
+  if (_networkTriage) return _networkTriage;
+  _networkTriage = new Map();
+  (report.alerts || []).forEach((a) => {
+    if (!a.priority_reason) return;
+    const et = a.event_type || "";
+    if (et !== "DnsQuery" && et !== "NetworkConnect") return;
+    const d = a.data || {};
+    const name = (d.QueryName || d.DestinationHostname || "").replace(/\.$/, "").toLowerCase();
+    if (!name) return;
+    // high beats low if both ever key the same name
+    const cur = _networkTriage.get(name);
+    if (!cur || (cur.priority !== "high" && a.priority === "high")) {
+      _networkTriage.set(name, { priority: a.priority, reason: a.priority_reason });
+    }
+  });
+  return _networkTriage;
+}
+
+function networkTriageBadge(hostname) {
+  if (!hostname) return "";
+  const t = networkTriageMap().get(String(hostname).replace(/\.$/, "").toLowerCase());
+  if (!t) return "";
+  if (t.priority === "high") return ` <span class="badge bad" title="${escapeHtml(t.reason)}">DGA-suspect</span>`;
+  if (t.priority === "low") return ` <span class="badge neutral" title="${escapeHtml(t.reason)}">os-noise</span>`;
+  return "";
+}
 const OTHER_SYSMON_EVENT_TYPES = [
   "DriverLoad", "PipeCreated", "PipeConnected",
   "WmiEventFilter", "WmiEventConsumer", "WmiEventConsumerToFilter",
   "ClipboardChange", "FileBlockExecutable", "FileBlockShredding", "FileExecutableDetected",
-  "SysmonEvent255",
+  "SysmonEvent255", "SysmonEvent16",
 ];
+// WMI-Activity ETW (agent/windows/wmi_collector.py) -- separate source
+// ("wmi_etw"), covers the dead Sysmon EID 19-21 gap on this guest.
+const WMI_EVENT_TYPES = ["WmiOperation", "WmiQueryFailure", "WmiFilterActivity", "WmiTemporaryConsumer", "WmiPermanentConsumer"];
 const EVENTLOG_SOURCES = ["security", "system", "windefend"];
 const BLINDSPOT_ALERT_TYPES = ["ApitraceBlindSpot", "ApitraceSilence"];
 const GUARDIAN_ALERT_TYPES = ["GuardianProtectedAccess", "GuardianProtectedRegistry", "GuardianModuleRemap", "GuardianInjectionFailed"];
@@ -1388,6 +1434,7 @@ const NAV_GROUPS = [
     { target: "sec-registry", label: "Registry", count: () => typeCount(REGISTRY_EVENT_TYPES) + iocListCount("registry_persistence")() },
     { target: "sec-eventlogs", label: "Event logs", count: () => eventlogCount() },
     { target: "sec-sysmon-other", label: "Sysmon other", count: () => typeCount(OTHER_SYSMON_EVENT_TYPES) },
+    { target: "sec-wmi", label: "WMI", count: () => typeCount(WMI_EVENT_TYPES) },
   ]},
   { label: "Network", sections: [
     { target: "sec-network", label: "Network", count: null },
@@ -1737,11 +1784,16 @@ function telemetryColumns(kind) {
           return r ? `<span class="badge bad">${escapeHtml(String(d.ScanResult))}</span>` : escapeHtml(String(d.ScanResult ?? "0"));
         } },
         { label: "Content (preview)", cls: "mono small", render: (e, d) => escapeHtml((d.Content || "").slice(0, 250)) }];
+    case "wmi":
+      return [timeCol, typeCol,
+        { label: "PID", render: (e, d) => escapeHtml(String(d.ProcessId ?? "")) },
+        { label: "Operation / consumer", cls: "mono small", render: (e, d) => escapeHtml((d.Operation || d.Consumer || "").toString().slice(0, 200)) },
+        { label: "Namespace / query", cls: "mono small", render: (e, d) => escapeHtml((d.Namespace || d.Query || "").toString().slice(0, 200)) }];
     case "network":
       return [timeCol, typeCol, actorCol,
         { label: "Destination / query", cls: "mono small", render: (e, d) => escapeHtml(
           d.DestinationIp ? `${d.DestinationIp}${d.DestinationPort ? ":" + d.DestinationPort : ""}` : (d.QueryName || d.Image || "")
-        ) },
+        ) + networkTriageBadge(d.QueryName || d.DestinationHostname) },
         { label: "Detail", cls: "mono small", render: (e, d) => escapeHtml((d.QueryResults || d.QueryStatus || d.Protocol || "").toString().slice(0, 120)) }];
     default:
       return [timeCol,
@@ -1808,6 +1860,13 @@ function wireTelemetryTabs() {
   });
   if (sysmonOther) registerLazy("sec-sysmon-other", sysmonOther.load);
 
+  const wmi = mk("wmi-browser", "wmi", {
+    source: "wmi_etw", eventTypes: WMI_EVENT_TYPES,
+    searchPlaceholder: "filter operation / consumer / namespace…",
+    emptyText: "No WMI activity captured for this run.",
+  });
+  if (wmi) registerLazy("sec-wmi", wmi.load);
+
   const blindspots = mk("blindspots-browser", "blindspot", {
     endpoint: "alerts", eventTypes: BLINDSPOT_ALERT_TYPES,
     searchPlaceholder: "filter hook / pid…",
@@ -1834,6 +1893,7 @@ function wireTelemetryTabs() {
   setText("blindspots-count", (report.alerts || []).filter((a) => BLINDSPOT_ALERT_TYPES.includes(a.event_type)).length);
   setText("eventlogs-count", eventlogCount());
   setText("sysmon-other-count", typeCount(OTHER_SYSMON_EVENT_TYPES));
+  setText("wmi-count", typeCount(WMI_EVENT_TYPES));
 
   const amsi = mk("amsi-browser", "amsi", {
     source: "amsi", eventTypes: [],
