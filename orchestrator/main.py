@@ -513,6 +513,52 @@ def vm_provision_defender_on() -> Any:
         return JSONResponse(status_code=500, content={"status": "failed", "error": str(exc), "steps": steps})
 
 
+@app.post("/api/vm/provision-clean-archive")
+def vm_provision_clean_archive() -> Any:
+    """Golden-image hygiene: empty Sysmon's deleted-file archive
+    (C:\\SandboxArchive, SYSTEM-only ACL -> cleared via a SYSTEM scheduled
+    task) so golden-image residue (e.g. tens of thousands of stale archived
+    files) is not carried forward.
+
+    restore -> boot -> clear (before/after counts) -> recapture the golden
+    snapshot ONLY if the archive is verifiably empty afterwards. No reboot
+    needed: file deletion is immediately visible.
+    """
+    steps: list = []
+
+    def record(name: str, result: Any) -> Any:
+        steps.append({"step": name, "result": result})
+        return result
+
+    try:
+        hv = HyperVManager(_cfg())
+        record("restore_snapshot", hv.restore_snapshot())
+        record("start_vm", hv.start_vm())
+        clear = record("clear_sandbox_archive", hv.clear_sandbox_archive())
+
+        if clear.get("Status") != "cleaned" or clear.get("AfterFiles", -1) != 0:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "clean_failed",
+                    "detail": "Archive not verifiably empty after clear -- golden snapshot was NOT modified.",
+                    "steps": steps,
+                },
+            )
+
+        record("recapture_snapshot", hv.recapture_snapshot())
+        return {
+            "status": "provisioned",
+            "detail": (
+                f"Sandbox archive purged ({clear.get('BeforeFiles')} files, "
+                f"{clear.get('BeforeBytes')} bytes) and baked into the golden snapshot."
+            ),
+            "steps": steps,
+        }
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"status": "failed", "error": str(exc), "steps": steps})
+
+
 def _prepare_submission(
     cfg: Any,
     samples: SampleManager,

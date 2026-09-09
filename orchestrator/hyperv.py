@@ -49,6 +49,7 @@ class HyperVManager:
             "Copy-ProcessDumps",
             "Copy-DroppedFiles",
             "Copy-SandboxArchive",
+            "Clear-SandboxArchive",
             "Invoke-GuestPython",
             "Restart-Guest",
             "Console-InputServer-Start",
@@ -363,6 +364,18 @@ class HyperVManager:
             "Copy-SandboxArchive",
             HostDestinationDir=host_destination_dir,
             GuestFileCandidates="|".join(guest_file_candidates),
+        )
+
+    def clear_sandbox_archive(
+        self,
+        archive_dir: str = "C:\\SandboxArchive",
+    ) -> Dict[str, Any]:
+        """Empty Sysmon's deleted-file archive in the guest (golden-image
+        hygiene). Runs as SYSTEM via a one-shot scheduled task -- the dir has
+        a SYSTEM-only ACL. Returns before/after file+byte counts."""
+        return self._run_ps(
+            "Clear-SandboxArchive",
+            ArchiveDir=archive_dir,
         )
 
     def capture_screenshot(

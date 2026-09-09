@@ -1471,6 +1471,112 @@ foreach ($p in $spec) {
     }
 }
 
+function Clear-SandboxArchive {
+    <#
+    .SYNOPSIS
+        Empties Sysmon's deleted-file archive (ArchiveDirectory, default
+        C:\SandboxArchive) in the guest -- golden-image hygiene. The archive
+        dir has a SYSTEM-only ACL (gigi cannot even Test-Path inside it), so
+        the purge runs as a one-shot scheduled task as SYSTEM, same trick as
+        Copy-SandboxArchiveFromVM. The directory itself is kept (Sysmon owns
+        it). Before/after stats are written to a gigi-readable result file so
+        the host can verify-gate the snapshot recapture.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VMName,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ArchiveDir = "C:\SandboxArchive",
+
+        [Parameter(Mandatory = $false)]
+        [string]$ResultPath = "C:\SandboxAgent\archive_clean_result.json",
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialUsername,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialPassword
+    )
+
+    Assert-VMExists -VMName $VMName | Out-Null
+    $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
+    $invokeArgs = @{ VMName = $VMName }
+    if ($cred) { $invokeArgs['Credential'] = $cred }
+
+    # 1. Register + start a one-shot SYSTEM task that purges the archive
+    #    contents and writes before/after stats as JSON.
+    $cleanScript = "C:\SandboxAgent\archive_clean.ps1"
+    Invoke-Command @invokeArgs -ScriptBlock {
+        param($cleanScript, $archiveDir, $resultPath)
+        $body = @'
+$dir = 'ARCHIVE_DIR'
+$res = 'RESULT_PATH'
+function Measure-Archive($d) {
+    if (-not (Test-Path $d)) { return @{ files = 0; bytes = 0; exists = $false } }
+    # .NET enumeration is much faster than Get-ChildItem for ~100k entries
+    $count = 0; $bytes = [int64]0
+    foreach ($p in [System.IO.Directory]::EnumerateFiles($d, '*', 'AllDirectories')) {
+        $count++
+        try { $bytes += (New-Object System.IO.FileInfo($p)).Length } catch {}
+    }
+    return @{ files = $count; bytes = $bytes; exists = $true }
+}
+$before = Measure-Archive $dir
+if (Test-Path $dir) {
+    # robocopy /MIR from an empty dir = fastest mass-delete on Windows;
+    # mirrors CONTENT only (no /SEC), so the archive dir's own ACL is untouched
+    $empty = Join-Path $env:TEMP 'sandbox_archive_empty'
+    New-Item -ItemType Directory -Path $empty -Force | Out-Null
+    robocopy $empty $dir /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
+    Remove-Item $empty -Recurse -Force -ErrorAction SilentlyContinue
+}
+$after = Measure-Archive $dir
+@{ before = $before; after = $after } | ConvertTo-Json -Compress | Set-Content -Path $res -Encoding ascii
+'@
+        $body = $body.Replace('ARCHIVE_DIR', $archiveDir).Replace('RESULT_PATH', $resultPath)
+        Set-Content -Path $cleanScript -Value $body -Encoding ascii
+        $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$cleanScript`""
+        $principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        Register-ScheduledTask -TaskName 'SandboxArchiveClean' -Action $action -Principal $principal -Force | Out-Null
+        Start-ScheduledTask -TaskName 'SandboxArchiveClean'
+    } -ArgumentList $cleanScript, $ArchiveDir, $ResultPath | Out-Null
+
+    # 2. Wait for the result file (purge of ~100k files: measure + robocopy +
+    #    re-measure; generous budget for a spinning VHD).
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $done = $false
+    while ($sw.Elapsed.TotalSeconds -lt 900) {
+        $done = Invoke-Command @invokeArgs -ScriptBlock { param($p) Test-Path $p } -ArgumentList $ResultPath
+        if ($done) { break }
+        Start-Sleep -Seconds 3
+    }
+    $stats = $null
+    if ($done) {
+        $raw = Invoke-Command @invokeArgs -ScriptBlock { param($p) Get-Content $p -Raw } -ArgumentList $ResultPath
+        $stats = $raw | ConvertFrom-Json
+    }
+    Invoke-Command @invokeArgs -ScriptBlock {
+        param($c, $r)
+        Unregister-ScheduledTask -TaskName 'SandboxArchiveClean' -Confirm:$false -ErrorAction SilentlyContinue
+        Remove-Item $c, $r -Force -ErrorAction SilentlyContinue
+    } -ArgumentList $cleanScript, $ResultPath | Out-Null
+
+    if (-not $done) {
+        return [PSCustomObject]@{ VMName = $VMName; ArchiveDir = $ArchiveDir; Status = 'clean_timeout' }
+    }
+    return [PSCustomObject]@{
+        VMName      = $VMName
+        ArchiveDir  = $ArchiveDir
+        Status      = 'cleaned'
+        BeforeFiles = [int]$stats.before.files
+        BeforeBytes = [int64]$stats.before.bytes
+        AfterFiles  = [int]$stats.after.files
+        AfterBytes  = [int64]$stats.after.bytes
+    }
+}
+
 function Copy-DroppedFilesFromVM {
     <#
     .SYNOPSIS
@@ -2083,6 +2189,7 @@ if ($args.Count -gt 0) {
         "Copy-ProcessDumps"       { Copy-ProcessDumpsFromVM @remainingArgs | ConvertTo-Json -Depth 5 }
         "Copy-DroppedFiles"       { Copy-DroppedFilesFromVM @remainingArgs | ConvertTo-Json -Depth 5 }
         "Copy-SandboxArchive"     { Copy-SandboxArchiveFromVM @remainingArgs | ConvertTo-Json -Depth 5 }
+        "Clear-SandboxArchive"    { Clear-SandboxArchive @remainingArgs | ConvertTo-Json -Depth 5 }
         "Invoke-GuestPython"      { Invoke-GuestPython @remainingArgs | ConvertTo-Json -Depth 5 }
         "Restart-Guest"           { Restart-SandboxGuest @remainingArgs | ConvertTo-Json }
         "Recapture-Snapshot"      { Recapture-SandboxSnapshot @remainingArgs | ConvertTo-Json }
