@@ -10,7 +10,7 @@ Operational knowledge for the Hyper-V malware sandbox (this repo). For interpret
 ## Topology
 
 - Orchestrator: FastAPI/uvicorn on `http://127.0.0.1:18000`, started elevated via `start.ps1`. UI at `/ui/`, API under `/api/`.
-- VM: `bande nere`, snapshot `SANDBOX_READY` (reverted automatically per run). Guest agent dir `C:\SandboxAgent`, sample drop folder `C:\Sandbox`.
+- VM: `pentagramma`, snapshot `SANDBOX_READY` (reverted automatically per run). Guest agent dir `C:\SandboxAgent`, sample drop folder `C:\Sandbox`.
 - Python: `.venv\Scripts\python.exe`. Config: `config\config.yaml`.
 
 ## Orchestrator lifecycle — read before touching processes

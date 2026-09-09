@@ -1,6 +1,6 @@
 # guardian_a1_test.ps1 -- WS-A1a functional test (host-side, ELEVATED).
 #
-# Drives the "bande nere" analysis VM via PowerShell Direct to validate the
+# Drives the "pentagramma" analysis VM via PowerShell Direct to validate the
 # A1a driver jobs against the live guest:
 #   load    : copy signed driver + probe, (re)create + start the service
 #   test    : A) injection placement (standalone targeting of notepad.exe ->
@@ -19,7 +19,7 @@
 
 param(
     [Parameter(Mandatory = $true)][ValidateSet("load", "test", "cleanup")][string]$Stage,
-    [string]$VMName = "bande nere"
+    [string]$VMName = "pentagramma"
 )
 
 $ErrorActionPreference = "Stop"

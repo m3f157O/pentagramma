@@ -1,6 +1,6 @@
 # guardian_spike.ps1 -- WS-A0 feasibility spike (host-side, ELEVATED).
 #
-# Drives the "bande nere" analysis VM via PowerShell Direct to answer the
+# Drives the "pentagramma" analysis VM via PowerShell Direct to answer the
 # go/no-go question for SandboxGuard.sys:
 #   inspect : guest CI/WDAC policy + testsigning state (read-only)
 #   enable  : testsigning on + test cert into Root/TrustedPublisher + reboot
@@ -19,7 +19,7 @@
 
 param(
     [Parameter(Mandatory = $true)][ValidateSet("inspect", "enable", "load", "diag", "cleanup")][string]$Stage,
-    [string]$VMName = "bande nere"
+    [string]$VMName = "pentagramma"
 )
 
 $ErrorActionPreference = "Stop"

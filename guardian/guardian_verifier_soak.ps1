@@ -14,7 +14,7 @@
 #   powershell -ExecutionPolicy Bypass -File guardian\guardian_verifier_soak.ps1
 
 param(
-    [string]$VMName = "bande nere",
+    [string]$VMName = "pentagramma",
     [string]$SnapshotName = "SANDBOX_READY"
 )
 

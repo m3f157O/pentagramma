@@ -17,7 +17,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$VMName = "bande nere",
+    [string]$VMName = "pentagramma",
     [string]$SnapshotName = "SANDBOX_READY",
     [int]$TimeoutSeconds = 120,
     [string]$PreviousReport = ""

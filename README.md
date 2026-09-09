@@ -13,7 +13,7 @@ argument-level **API tracing** (a MinHook monitor) is in progress.
 
 - **Host:** Python orchestrator (FastAPI) + PowerShell driver over PowerShell Direct.
 - **Guest:** Sysmon + collectors, driven per-run; nothing runs on the host.
-- **VM:** one existing VM (`bande nere`) with a `SANDBOX_READY` snapshot.
+- **VM:** one existing VM (`pentagramma`) with a `SANDBOX_READY` snapshot.
 
 ---
 
@@ -41,7 +41,7 @@ Current measured quality on the labeled corpus (109 runs): precision(malicious)
 ## Prerequisites
 
 1. **Hyper-V enabled** on the host (Windows 10/11 Pro/Enterprise or Server).
-2. **The analysis VM** named `bande nere` (or edit `config/config.yaml → hyperv.analysis_vm`),
+2. **The analysis VM** named `pentagramma` (or edit `config/config.yaml → hyperv.analysis_vm`),
    with a snapshot `SANDBOX_READY`.
 3. The **golden image** prepared once: Sysmon installed with `agent/windows/sysmonconfig.xml`,
    Python present, Defender **ON**, WDAC/Code-Integrity policy as desired. See *Golden image*.
@@ -64,7 +64,7 @@ Everything lives in `config/config.yaml`. Key sections:
 
 ```yaml
 hyperv:
-  analysis_vm: "bande nere"
+  analysis_vm: "pentagramma"
   snapshot_name: "SANDBOX_READY"
 
 api:

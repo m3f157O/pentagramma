@@ -47,7 +47,7 @@ powershell -ExecutionPolicy Bypass -File guardian\guardian_spike.ps1 -Stage clea
 
 ### Results
 
-Spike run 2026-09-01 against "bande nere" (inspect → enable → load → diag):
+Spike run 2026-09-01 against "pentagramma" (inspect → enable → load → diag):
 
 - CI policy enforcement status: **0 (off)**; Usermode CI **0 (off)**; VBS **0 (off)**. Only `driversipolicy.p7b` deployed, not enforced.
 - testsigning accepted: **yes** (`bcdedit` shows `testsigning Yes` post-reboot; Secure Boot off, so no posture conflict).
