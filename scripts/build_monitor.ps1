@@ -13,7 +13,7 @@
 # fails configure with MSB6003). Keep the build dir SHORT -- the default below
 # is intentional. Do not point it inside a deep temp/scratch tree.
 param(
-    [string]$BuildDir = "C:\Users\giammy\mb",
+    [string]$BuildDir = "C:\mb",
     [string]$Config = "Release"
 )
 $ErrorActionPreference = "Stop"

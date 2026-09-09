@@ -7,7 +7,7 @@ benign_control.bat suspicious/37 (baseline 12–37, **0 guardian alerts**),
 InjectionHarness malicious/90 + 9/9 techniques (baseline exact).
 A1a verified (§2). Deferred to A1b: minifilter file protection (job 3),
 hook-integrity verifier (job 4). Plan of record:
-`C:\Users\giammy\.kimi\plans\cyclops-beta-ray-bill-iron-fist.md`.
+internal planning doc (not in repo).
 
 Scope (per the 2026-08-19 design decision): one driver, three roles —
 **protect** the telemetry stack (Ob/Cm/minifilter), **verify** it

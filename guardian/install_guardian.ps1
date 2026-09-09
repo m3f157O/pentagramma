@@ -10,7 +10,11 @@
 
 param(
     [string]$VMName = "",
-    [string]$SnapshotName = ""
+    [string]$SnapshotName = "",
+    # Fresh-image provisioning (no golden snapshot exists yet): skip the
+    # initial restore and/or the final recapture; caller owns the snapshot.
+    [switch]$NoRestore,
+    [switch]$NoRecapture
 )
 
 $ErrorActionPreference = "Stop"
@@ -97,8 +101,12 @@ if ($vm.State -ne "Off") {
 }
 
 if (-not $alreadyProvisioned) {
-Write-Host "[provision] restoring golden snapshot '$SnapshotName' on '$VMName'..."
-Invoke-Hv "Restore-Snapshot" @("-SnapshotName", $SnapshotName)
+if (-not $NoRestore) {
+    Write-Host "[provision] restoring golden snapshot '$SnapshotName' on '$VMName'..."
+    Invoke-Hv "Restore-Snapshot" @("-SnapshotName", $SnapshotName)
+} else {
+    Write-Host "[provision] -NoRestore: skipping snapshot restore (fresh-image provisioning)"
+}
 Write-Host "[provision] booting..."
 Invoke-Hv "Start-VM" @("-TimeoutSeconds", "240")
 Wait-GuestReady
@@ -148,6 +156,10 @@ if ($verify.Service -notmatch "RUNNING" -or $verify.Ping -notmatch "PING ok") {
 }
 }
 
-Write-Host "[provision] verified. Recapturing golden snapshot '$SnapshotName'..."
-Invoke-Hv "Recapture-Snapshot" @("-SnapshotName", $SnapshotName)
-Write-Host "[provision] DONE -- SandboxGuard is baked into the golden image (testsigning + auto-start)."
+if (-not $NoRecapture) {
+    Write-Host "[provision] verified. Recapturing golden snapshot '$SnapshotName'..."
+    Invoke-Hv "Recapture-Snapshot" @("-SnapshotName", $SnapshotName)
+    Write-Host "[provision] DONE -- SandboxGuard is baked into the golden image (testsigning + auto-start)."
+} else {
+    Write-Host "[provision] verified. -NoRecapture: snapshot capture left to caller."
+}

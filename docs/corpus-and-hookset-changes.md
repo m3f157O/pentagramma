@@ -8,7 +8,7 @@ reporting changed to reconnect-then-report, MalShare API-key requirement,
 per-sample budget corrected to 2–4 min, AV-blocked-at-launch added as a
 first-class corpus outcome)
 **Date:** 2026-07-26
-**Source plan:** `C:\Users\giammy\.claude\plans\crispy-dreaming-zebra.md`
+**Source plan:** internal planning doc (not in repo)
 
 This document collects every proposed change from the approved plan into one
 project-owned reference. Nothing here has been built yet.

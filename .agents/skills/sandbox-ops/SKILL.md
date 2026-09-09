@@ -29,6 +29,7 @@ Operational knowledge for the Hyper-V malware sandbox (this repo). For interpret
 - `get_report` / `list_reports`: report retrieval; raw events omitted unless `include_raw_events=true`.
 - `restore_clean_snapshot` / `ensure_clean_snapshot`: manual VM state ops; normally unnecessary (per-run revert is automatic).
 - Golden-image provisioning endpoints (`POST /api/vm/provision-*`): verify-gated recapture pattern — the snapshot is only re-baked when guest verification passes. `provision-dressing` applies/ refreshes the anti-sandbox user environment (`docs\environment-dressing.md`).
+- To build a golden image from a CLEAN pre-existing VM: elevated `scripts\provision_golden_image.ps1 -PythonInstaller <python-3.11.x-amd64.exe>` (verify-gated; snapshot captured only if all steps pass; manual prereqs: OS install, admin user + autologon, WDAC policy).
 - `run_injection_harness`: rebuilds harness from source + runs (needs .NET 8 SDK, elevation). If a built `InjectionHarness.exe` already exists, prefer `submit_sample` + `validate_injection_harness`.
 
 ## Change-validation protocol (canary contract)

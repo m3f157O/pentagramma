@@ -44,7 +44,8 @@ Current measured quality on the labeled corpus (109 runs): precision(malicious)
 2. **The analysis VM** named `pentagramma` (or edit `config/config.yaml → hyperv.analysis_vm`),
    with a snapshot `SANDBOX_READY`.
 3. The **golden image** prepared once: Sysmon installed with `agent/windows/sysmonconfig.xml`,
-   Python present, Defender **ON**, WDAC/Code-Integrity policy as desired. See *Golden image*.
+   Python present, Defender **ON**, WDAC/Code-Integrity policy as desired. See *Golden image*
+   (automated by `scripts/provision_golden_image.ps1`).
 4. **PowerShell Direct** working (host + guest Windows; Integration Services running).
    The orchestrator must run with rights to manage Hyper-V (elevated / Hyper-V Administrators).
 5. An **isolated virtual switch** so the VM can't reach production systems.
@@ -52,7 +53,7 @@ Current measured quality on the labeled corpus (109 runs): precision(malicious)
 ## Install
 
 ```powershell
-cd C:\Users\giammy\Desktop\agents\sandbox
+cd <this repo>
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
@@ -90,8 +91,21 @@ static_analysis:
 
 ## Golden image / snapshot
 
-Prepare the VM once (Sysmon, Python, Defender on, monitor binaries staged), shut it
-down cleanly, then capture the snapshot:
+To build a golden image from a **clean pre-existing VM** (Windows installed, admin user
+per `config.yaml` + autologon, PowerShell Direct working), run elevated:
+
+```powershell
+.\scripts\provision_golden_image.ps1 -PythonInstaller C:\path\python-3.11.x-amd64.exe
+# skips available: -SkipPython -SkipDressing -SkipGuardian -DefenderOff; -Force recaptures an existing SANDBOX_READY
+```
+
+It boots the VM and verify-gates each step: guest Python 3.11 (silent install), agent
+deploy to `C:\SandboxAgent`, pip requirements, Sysmon install, audit policy + PowerShell
+logging, environment dressing, Defender posture, SandboxGuard driver — then captures
+`SANDBOX_READY` only if every verification passes. Manual steps it does NOT do: VM
+creation/OS install, user + autologon setup, WDAC/Code-Integrity policy (warns only).
+
+To just (re)capture the snapshot of an already-prepared VM, shut it down cleanly and run:
 
 ```powershell
 .\scripts\create-snapshot.ps1
@@ -228,9 +242,10 @@ Only one job runs at a time (one VM); a second submission while one is active re
 `run_injection_harness` — a thin wrapper over the REST API. Start the orchestrator first.
 
 ```powershell
+# run from the repo root
 claude mcp add hyperv-sandbox -- `
-  "C:\Users\giammy\Desktop\agents\sandbox\.venv\Scripts\python.exe" `
-  "C:\Users\giammy\Desktop\agents\sandbox\mcp_server\server.py"
+  ".venv\Scripts\python.exe" `
+  "mcp_server\server.py"
 ```
 
 Report tools omit the multi-MB raw event stream by default — pass
