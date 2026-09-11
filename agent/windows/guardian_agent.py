@@ -141,25 +141,56 @@ def _open_device():
     return handle
 
 
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_void_p),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", wintypes.WCHAR * wintypes.MAX_PATH),
+    ]
+
+
+_k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+_k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+# Without explicit argtypes, ctypes truncates the 64-bit byref pointer
+# (Process32FirstW fails with ERROR_BAD_LENGTH).
+_k32.Process32FirstW.restype = wintypes.BOOL
+_k32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+_k32.Process32NextW.restype = wintypes.BOOL
+_k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(_PROCESSENTRY32W)]
+
+
 def _find_pids_by_image(image_name: str):
-    """PIDs of ALL processes whose image matches (tasklist CSV parse -- pure
-    stdlib). There can be several: the Sysmon64 service AND transient
-    `sysmon64.exe -c` config-update instances coexist -- returning only the
-    first tasklist row once protected the CLI process while the real service
-    stayed killable (A4 tamper canary)."""
-    import csv
-    import subprocess
+    """PIDs of ALL processes whose image matches (Toolhelp32 snapshot via
+    ctypes -- pure stdlib, spawns no child process; the previous per-tick
+    tasklist.exe spawn was pure Sysmon ProcessCreate/ImageLoad noise, ~1
+    process pair per second for the whole run). There can be several: the
+    Sysmon64 service AND transient `sysmon64.exe -c` config-update instances
+    coexist -- returning only the first tasklist row once protected the CLI
+    process while the real service stayed killable (A4 tamper canary)."""
+    TH32CS_SNAPPROCESS = 0x2
     pids = []
+    snap = _k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if not snap or snap == INVALID_HANDLE_VALUE:
+        return pids
     try:
-        out = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
-            capture_output=True, text=True, timeout=15,
-        ).stdout
-        for row in csv.reader(out.splitlines()):
-            if row and row[0].lower() == image_name.lower():
-                pids.append(int(row[1]))
+        entry = _PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+        ok = _k32.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            if entry.szExeFile.lower() == image_name.lower():
+                pids.append(entry.th32ProcessID)
+            ok = _k32.Process32NextW(snap, ctypes.byref(entry))
     except Exception:
         pass
+    finally:
+        _k32.CloseHandle(snap)
     return pids
 
 

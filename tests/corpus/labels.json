@@ -61,16 +61,112 @@
         "filename": "gw_netconfig.bat"
       },
       "label": "benign",
-      "family": "goodware",
-      "note": "goodware FP-guard: read-only ipconfig/netstat/arp/route"
+      "family": "goodware_boundary",
+      "note": "goodware boundary-guard (suspicious tolerated, malicious = FP): read-only ipconfig/netstat/arp/route"
     },
     {
       "match": {
         "filename": "gw_signed_tools.bat"
       },
       "label": "benign",
+      "family": "goodware_boundary",
+      "note": "goodware boundary-guard (suspicious tolerated, malicious = FP): signed MS tools tasklist/driverquery/where/systeminfo"
+    },
+    {
+      "match": {
+        "filename": "gw_certutil_roundtrip.bat"
+      },
+      "label": "benign",
+      "family": "goodware_boundary",
+      "note": "goodware boundary-guard (suspicious tolerated, malicious = FP): certutil encode/decode round-trip in TEMP"
+    },
+    {
+      "match": {
+        "filename": "gw_rundll32_benign.bat"
+      },
+      "label": "benign",
+      "family": "goodware_boundary",
+      "note": "goodware boundary-guard (suspicious tolerated, malicious = FP): rundll32 advapi32 ProcessIdleTasks (documented benign call)"
+    },
+    {
+      "match": {
+        "filename": "gw_eventlog_query.ps1"
+      },
+      "label": "benign",
+      "family": "goodware_boundary",
+      "note": "goodware boundary-guard (suspicious tolerated, malicious = FP): read-only Get-WinEvent/wevtutil queries"
+    },
+    {
+      "match": {
+        "filename": "gw_account_enum.bat"
+      },
+      "label": "benign",
+      "family": "goodware_boundary",
+      "note": "goodware boundary-guard (suspicious tolerated, malicious = FP): read-only net user/localgroup + whoami /groups"
+    },
+    {
+      "match": {
+        "filename": "gw_dns_check.bat"
+      },
+      "label": "benign",
+      "family": "goodware_boundary",
+      "note": "goodware boundary-guard (suspicious tolerated, malicious = FP): nslookup of well-known names"
+    },
+    {
+      "match": {
+        "filename": "gw_bitsadmin_query.bat"
+      },
+      "label": "benign",
+      "family": "goodware_boundary",
+      "note": "goodware boundary-guard (suspicious tolerated, malicious = FP): read-only bitsadmin /list"
+    },
+    {
+      "match": {
+        "filename": "gw_base64_selfdata.ps1"
+      },
+      "label": "benign",
+      "family": "goodware_boundary",
+      "note": "goodware boundary-guard (suspicious tolerated, malicious = FP): FromBase64String round-trip of own text in TEMP"
+    },
+    {
+      "match": {
+        "filename": "gw_task_lifecycle.bat"
+      },
+      "label": "benign",
+      "family": "goodware_boundary",
+      "note": "goodware boundary-guard (suspicious tolerated, malicious = FP): schtasks create/query/delete of a no-op task (self-cleaning)"
+    },
+    {
+      "match": {
+        "filename": "gw_com_automation.ps1"
+      },
+      "label": "benign",
       "family": "goodware",
-      "note": "goodware FP-guard: signed MS tools tasklist/driverquery/where/systeminfo"
+      "note": "goodware FP-guard: WScript.Network/WScript.Shell property reads"
+    },
+    {
+      "match": {
+        "filename": "gw_reg_export.bat"
+      },
+      "label": "benign",
+      "family": "goodware",
+      "note": "goodware FP-guard: reg export of benign HKCU key to TEMP"
+    },
+    {
+      "match": {
+        "filename": "gw_web_check.ps1"
+      },
+      "label": "benign",
+      "family": "goodware_boundary",
+      "note": "goodware boundary-guard (suspicious tolerated, malicious = FP): single plain Invoke-WebRequest GET, no cradle"
+    },
+    {
+      "match": {
+        "filename": "gw_hello_world.exe"
+      },
+      "label": "benign",
+      "family": "goodware",
+      "note": "goodware FP-guard: trivial self-compiled .NET hello-world PE"
     },
     {
       "match": {
@@ -1215,6 +1311,38 @@
       "label": "malicious",
       "family": "asyncrat",
       "note": "abuse.ch ground truth (malwarebazaar family + threatfox IOCs)"
+    },
+    {
+      "match": {
+        "filename": "gw_real_7za.exe"
+      },
+      "label": "benign",
+      "family": "goodware",
+      "note": "real goodware: 7-Zip standalone console (unsigned, real-world OSS)"
+    },
+    {
+      "match": {
+        "filename": "gw_real_curl.exe"
+      },
+      "label": "benign",
+      "family": "goodware",
+      "note": "real goodware: Microsoft-signed curl.exe from System32"
+    },
+    {
+      "match": {
+        "filename": "gw_real_plink.exe"
+      },
+      "label": "benign",
+      "family": "goodware",
+      "note": "real goodware: PuTTY plink (signed Simon Tatham)"
+    },
+    {
+      "match": {
+        "filename": "gw_real_rg.exe"
+      },
+      "label": "benign",
+      "family": "goodware",
+      "note": "real goodware: ripgrep (unsigned, real-world OSS)"
     }
   ]
 }

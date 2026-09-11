@@ -25,29 +25,40 @@ LABELS = PROJECT_ROOT / "tests" / "corpus" / "labels.json"
 # fails -> silently skipped every big report; the original bug).
 SHA256_RE = re.compile(r'"sha256"\s*:\s*"([0-9a-fA-F]{64})"')
 TIMESTAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
+FILENAME_RE = re.compile(r'"filename"\s*:\s*"([^"]+)"')
 
 
-def _report_head(rp: Path) -> Tuple[str, str]:
-    """(sample sha256, report timestamp) read from a report's head;
-    ('', '') when unavailable. Shared by the corpus-metrics scripts."""
+def _report_identity_head(rp: Path) -> Tuple[str, str, str]:
+    """(sample sha256, report timestamp, sample filename) read from a
+    report's head; ('', '', '') when unavailable. Shared by the
+    corpus-metrics scripts so none of them ever needs to parse a 100 MB
+    report just to decide whether to replay it."""
     try:
         with rp.open("r", encoding="utf-8", errors="replace") as fh:
             head = fh.read(65536)
     except Exception:
-        return "", ""
-    m = SHA256_RE.search(head)
+        return "", "", ""
+    sha_m = SHA256_RE.search(head)
     ts_m = TIMESTAMP_RE.search(head)
-    if m:
-        return m.group(1).lower(), (ts_m.group(1) if ts_m else "")
+    fn_m = FILENAME_RE.search(head)
+    if sha_m:
+        return (sha_m.group(1).lower(), ts_m.group(1) if ts_m else "",
+                fn_m.group(1) if fn_m else "")
     # Fallback for small reports with an unusual layout (error stubs etc.).
     try:
         if rp.stat().st_size > 2_000_000:
-            return "", ""
+            return "", "", ""
         doc = json.loads(rp.read_text(encoding="utf-8", errors="replace"))
         sha = (((doc.get("sample") or {}).get("hashes") or {}).get("sha256") or "").lower()
-        return sha, (doc.get("timestamp") or "")
+        return sha, (doc.get("timestamp") or ""), ((doc.get("sample") or {}).get("filename") or "")
     except Exception:
-        return "", ""
+        return "", "", ""
+
+
+def _report_head(rp: Path) -> Tuple[str, str]:
+    """(sample sha256, report timestamp) from a report's head."""
+    sha, ts, _fn = _report_identity_head(rp)
+    return sha, ts
 
 
 def _report_sha256(rp: Path) -> str:

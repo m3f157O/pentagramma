@@ -90,6 +90,13 @@ SYNTHETIC_EVENT_ID_DROPPED_FILE_YARA_MATCH = 9104
 SYNTHETIC_EVENT_ID_NETWORK_BURST = 9105
 SYNTHETIC_EVENT_ID_DROPPED_FILE_CAPA_HIT = 9106
 
+# String-context YARA rules excluded from process-memory-dump rescans -- see
+# detect_dump_yara_matches() docstring for the rationale.
+_DUMP_YARA_RULE_EXCLUSIONS = frozenset({
+    "suspicious_powershell_download",
+    "suspicious_cmd_commands",
+})
+
 SHORT_LIVED_THRESHOLD_SECONDS = 0.5
 PROCESS_BURST_WINDOW_SECONDS = 2.0
 PROCESS_BURST_MIN_COUNT = 3
@@ -246,6 +253,16 @@ def detect_dump_yara_matches(process_dumps: Optional[Dict[str, Any]]) -> List[Di
     report dict (produced post-execution in executor.py), not raw
     telemetry events -- there's no natural per-event timestamp for a
     static rescan, so timestamp is left unset.
+
+    Rules in _DUMP_YARA_RULE_EXCLUSIONS are skipped: their string contexts
+    (bare API names like "FromBase64String"/"Invoke-WebRequest", or
+    "cmd.exe /c" patterns) appear in STOCK interpreter memory -- engine
+    metadata, cmdlet/help strings inside powershell.exe/cmd.exe -- so they
+    match every dump of a script interpreter regardless of what the sample
+    does (confirmed 2026-09-11: a COM-read goodware .ps1 scored
+    malicious/40 purely from these two rules matching its powershell.exe
+    dumps). They stay fully active on the sample file and dropped files,
+    where the scanned content IS the artifact.
     """
     if not process_dumps or not process_dumps.get("enabled"):
         return []
@@ -255,6 +272,8 @@ def detect_dump_yara_matches(process_dumps: Optional[Dict[str, Any]]) -> List[Di
             if "error" in match:
                 continue
             rule = match.get("rule")
+            if rule in _DUMP_YARA_RULE_EXCLUSIONS:
+                continue
             filename = item.get("filename")
             alerts.append(
                 {

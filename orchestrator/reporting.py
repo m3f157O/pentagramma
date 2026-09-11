@@ -81,6 +81,216 @@ def _tooling_loadlibrary_vas(telemetry_events: List[Dict[str, Any]]) -> set:
     return vas
 
 
+# ---------------------------------------------------------------------------
+# OS-noise / own-tooling scope-leak suppression
+#
+# Three observed false-attribution classes (confirmed on benign canary
+# d89f08b6, whose ENTIRE 12-point score was these artifacts):
+#
+#  A. Our own tooling, genuinely in-lineage: the monitor DLL is injected into
+#     the sample and its children, so ImageLoad of \SandboxAgent\monitor_*.dll
+#     and PipeConnected to \sandbox_apitrace are legitimately in the sample's
+#     lineage -- but they are OUR instrumentation, not sample behavior.
+#  B. GUID-less alerts pid-adopted from a recycled PID now held by a known OS
+#     updater/noise process (e.g. MicrosoftEdgeUpdate.exe self-opens, EID 10
+#     carries SourceImage but no SourceProcessGuid).
+#  C. GUID-less WMI-ETW alerts from Windows' own Security Center health-probe
+#     subscription (LOCAL SERVICE querying AntiVirusProduct/FirewallProduct/
+#     AntiSpywareProduct via __InstanceOperationEvent) adopted from a recycled
+#     PID. Malware AV-discovery uses `SELECT ... FROM AntiVirusProduct`, not a
+#     subscription on instance operations -- the ISA-subscription form is the
+#     OS's own.
+#
+# All flips are scope-only (in_sample_scope=False + scope_reason), never
+# deletion -- same "classify, don't hide" contract as the other passes.
+# ---------------------------------------------------------------------------
+
+# Known OS updater/noise images whose GUID-less events must never be adopted
+# into sample scope (full-path masquerade outside these dirs still scores).
+_OS_NOISE_IMAGE_BASENAMES = frozenset({
+    "microsoftedgeupdate.exe",
+    "onedrivesetup.exe",
+    "onedrivestandaloneupdater.exe",
+    "compattelrunner.exe",
+    "searchindexer.exe",
+    "searchprotocolhost.exe",
+    "searchfilterhost.exe",
+    "tiworker.exe",
+    "mousocoreworker.exe",
+})
+
+_WMI_HEALTH_PROBE_RE = re.compile(
+    r"ISA\s+'(AntiVirusProduct|FirewallProduct|AntiSpywareProduct)'", re.IGNORECASE
+)
+
+
+def _suppress_os_noise_scope_leaks(alerts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out = []
+    for alert in alerts:
+        if not alert.get("in_sample_scope"):
+            out.append(alert)
+            continue
+        data = alert.get("data") or {}
+        etype = str(alert.get("event_type") or "")
+        reason = None
+
+        # A. our own monitor DLL / apitrace pipe inside sample processes
+        loaded = str(data.get("ImageLoaded") or "").lower()
+        if etype == "ImageLoad" and "\\sandboxagent\\" in loaded:
+            reason = "tooling: sandbox monitor DLL loaded into sample process"
+        elif etype == "PipeConnected" and str(data.get("PipeName") or "").lower() in (
+            "\\sandbox_apitrace", "\\sandbox_guardian",
+        ):
+            reason = "tooling: sandbox apitrace/guardian pipe"
+
+        # B/C only apply to GUID-less alerts (pid-fallback adoption; the guid
+        # path is immune to this class of error by construction).
+        elif not (data.get("ProcessGuid") or data.get("SourceProcessGuid")):
+            # B. known OS updater/noise image holding a recycled pid
+            image = _basename(data.get("SourceImage") or data.get("Image") or data.get("ProcessName"))
+            if image and image in _OS_NOISE_IMAGE_BASENAMES:
+                reason = f"os-noise: {image} adopted via recycled pid"
+            # C. Windows Security Center health-probe WMI subscription
+            elif (
+                alert.get("source") == "wmi_etw"
+                and str(data.get("User") or "").upper().startswith("NT AUTHORITY\\")
+                and _WMI_HEALTH_PROBE_RE.search(str(data.get("Query") or ""))
+            ):
+                reason = "os-noise: Windows Security Center health-probe WMI subscription"
+
+        if reason:
+            alert = dict(alert)
+            alert["in_sample_scope"] = False
+            alert["scope_reason"] = reason
+        out.append(alert)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Monitor-injection / staging artifact suppression
+#
+# Two more tooling classes, confirmed 2026-09-11 by the goodware FP hunt
+# (a trivial unsigned hello-world exe scored malicious/42 purely on these):
+#
+#  D. The monitor loader (C:\SandboxAgent\monitor_loader_x86/x64.exe) launches
+#     the sample and injects the hook DLL into it: Sysmon sees EID 10
+#     ProcessAccess (0x1fffff) loader->sample, and the behavioral-signature
+#     engine synthesizes an ApitraceInjectionChain ("write into remote process
+#     + thread start", critical/25) attributed to the LOADER's pid. Both are
+#     instrumentation, not sample behavior -- and they fire on EVERY exe/dll
+#     sample, padding every verdict. The monitor's child-following injection
+#     from a hooked parent's context (cmd.exe -> certutil.exe EID 10) is the
+#     same class; it pairs 1:1 with the tooling EID 8 (LoadLibraryW VA)
+#     already suppressed by _suppress_tooling_remote_thread_alerts.
+#  E. Samples are staged as C:\Sandbox\<sha256> with NO extension, so Sigma
+#     rules about suspicious/absent extensions (e.g. "Execution of Suspicious
+#     File Type Extension") fire on the root sample process regardless of
+#     what the sample is. The extension choice is ours, not the sample's.
+#
+# Same contract as the other passes: flip in_sample_scope + scope_reason,
+# never delete.
+# ---------------------------------------------------------------------------
+
+_TOOLING_IMAGE_DIR = "\\sandboxagent\\"
+
+# Sigma rule ids that fire purely on our extensionless staging path. Add ids
+# here only with a live-report link proving the match is on the staged name.
+_STAGING_ARTIFACT_SIGMA_IDS = frozenset({
+    "c09dad97-1c78-4f71-b127-7edb2b8e491a",  # Execution of Suspicious File Type Extension
+})
+
+
+def _tooling_pids(telemetry_events: List[Dict[str, Any]]) -> set:
+    """Pids whose ProcessCreate image lives under C:\\SandboxAgent\\ (the
+    monitor loaders and any other sandbox tooling)."""
+    pids = set()
+    for event in telemetry_events:
+        if (event.get("event_type") or event.get("EventType")) != "ProcessCreate":
+            continue
+        data = event.get("data") or {}
+        if _TOOLING_IMAGE_DIR not in str(data.get("Image") or "").lower():
+            continue
+        try:
+            pids.add(int(data.get("ProcessId")))
+        except (TypeError, ValueError):
+            continue
+    return pids
+
+
+def _suppress_monitor_injection_artifacts(
+    alerts: List[Dict[str, Any]],
+    telemetry_events: List[Dict[str, Any]],
+    execution_info: Optional[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    tooling_pids = _tooling_pids(telemetry_events)
+    vas = _tooling_loadlibrary_vas(telemetry_events)
+    # (SourcePid, TargetPid) pairs of the monitor's child-following EID 8s,
+    # used to catch the sibling EID 10 (process open) of the same injection.
+    tooling_pairs = set()
+    if vas:
+        for alert in alerts:
+            if alert.get("event_type") != "CreateRemoteThread":
+                continue
+            data = alert.get("data") or {}
+            try:
+                start = int(str(data.get("StartAddress") or "0"), 16)
+            except ValueError:
+                continue
+            if start not in vas:
+                continue
+            try:
+                tooling_pairs.add((int(data.get("SourceProcessId")), int(data.get("TargetProcessId"))))
+            except (TypeError, ValueError):
+                continue
+    staged_path = str((execution_info or {}).get("Path") or "").lower()
+
+    out = []
+    for alert in alerts:
+        if not alert.get("in_sample_scope"):
+            out.append(alert)
+            continue
+        data = alert.get("data") or {}
+        reason = None
+
+        actor = str(data.get("SourceImage") or "").lower()
+        if actor and _TOOLING_IMAGE_DIR in actor:
+            # D. action performed BY a sandbox tooling binary (loader -> sample)
+            reason = "tooling: monitor loader action on sample"
+        elif alert.get("source") == "apitrace" and tooling_pids:
+            # D. behavioral signature synthesized from the loader's own
+            #    injection API calls
+            try:
+                _pid = int(data.get("ProcessId"))
+            except (TypeError, ValueError):
+                _pid = None
+            if _pid is not None and _pid in tooling_pids:
+                reason = "tooling: monitor loader injection (apitrace)"
+        elif alert.get("event_type") == "ProcessAccess" and tooling_pairs:
+            # D. EID 10 sibling of a tooling EID 8 child-following injection
+            try:
+                pair = (int(data.get("SourceProcessId")), int(data.get("TargetProcessId")))
+            except (TypeError, ValueError):
+                pair = None
+            if pair and pair in tooling_pairs:
+                reason = "tooling: monitor child-following injection (process open)"
+
+        # E. staging-artifact Sigma rules on the staged sample path
+        if reason is None and staged_path:
+            sigma = alert.get("sigma") or {}
+            if (
+                sigma.get("id") in _STAGING_ARTIFACT_SIGMA_IDS
+                and str(data.get("Image") or "").lower() == staged_path
+            ):
+                reason = "tooling: sandbox staging artifact (extensionless hash-named path)"
+
+        if reason:
+            alert = dict(alert)
+            alert["in_sample_scope"] = False
+            alert["scope_reason"] = reason
+        out.append(alert)
+    return out
+
+
 def _suppress_tooling_remote_thread_alerts(
     alerts: List[Dict[str, Any]],
     telemetry_events: List[Dict[str, Any]],
@@ -231,6 +441,8 @@ def compute_detection(
     lineage = build_pid_lineage(telemetry_events, sample_pid, (execution_info or {}).get("LauncherPath"))
     alerts = classify_alert_scope(alerts, lineage)
     alerts = _suppress_tooling_remote_thread_alerts(alerts, telemetry_events)
+    alerts = _suppress_os_noise_scope_leaks(alerts)
+    alerts = _suppress_monitor_injection_artifacts(alerts, telemetry_events, execution_info)
     sample_alert_count = sum(1 for a in alerts if a.get("in_sample_scope"))
 
     verdict = compute_verdict(alerts, static_analysis)

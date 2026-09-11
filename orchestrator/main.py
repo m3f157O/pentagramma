@@ -409,6 +409,50 @@ def vm_provision_dressing() -> Any:
         return JSONResponse(status_code=500, content={"status": "failed", "error": str(exc), "steps": steps})
 
 
+@app.post("/api/vm/provision-noise-reduction")
+def vm_provision_noise_reduction() -> Any:
+    """One-shot golden-image provisioning for OS-noise reduction: restore ->
+    boot -> copy agent -> apply_noise_reduction.py apply (disable updater/
+    telemetry/CEIP/indexer tasks+services, telemetry policies) -> verify ->
+    re-capture the golden snapshot. Re-capture is SKIPPED unless verification
+    passes. Idempotent; Defender + wuauserv are deliberately kept (see
+    agent/windows/apply_noise_reduction.py docstring). Same flow as
+    provision-dressing, so the existing image gets it without full
+    reprovisioning.
+    """
+    cfg = _cfg()
+    agent_src = cfg.paths.get("agent_dir")
+    guest_agent_dir = cfg.telemetry.get("guest_agent_dir", "C:\\SandboxAgent")
+    steps: list = []
+
+    def record(name: str, result: Any) -> Any:
+        steps.append({"step": name, "result": result})
+        return result
+
+    try:
+        hv = HyperVManager(cfg)
+        record("restore_snapshot", hv.restore_snapshot())
+        record("start_vm", hv.start_vm())
+        record("copy_agent", hv.copy_agent(agent_source_dir=agent_src, destination_dir=guest_agent_dir))
+        record("apply", hv.invoke_guest_python("apply_noise_reduction.py", "apply", agent_dir=guest_agent_dir))
+        verify = record("verify", hv.invoke_guest_python("apply_noise_reduction.py", "verify", agent_dir=guest_agent_dir))
+
+        if str(verify.get("ExitCode")) != "0":
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "verification_failed",
+                    "detail": "Noise-reduction verification failed in the guest. Golden snapshot was NOT modified.",
+                    "steps": steps,
+                },
+            )
+
+        record("recapture_snapshot", hv.recapture_snapshot())
+        return {"status": "provisioned", "detail": "OS noise reduction applied and baked into the golden snapshot.", "steps": steps}
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"status": "failed", "error": str(exc), "steps": steps})
+
+
 @app.post("/api/vm/provision-defender-off")
 def vm_provision_defender_off() -> Any:
     """One-shot golden-image provisioning: disable Microsoft Defender real-time

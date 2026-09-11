@@ -107,3 +107,185 @@ def test_real_defender_threat_kept():
     alerts = heuristics.detect_defender_threats([_defender_event("Trojan:Win32/Ceprolad.A")])
     assert len(alerts) == 1
     assert alerts[0]["in_sample_scope"] is True
+
+
+# ---------------------------------------------------------------------------
+# OS-noise scope-leak suppression (2026-09-05): the benign canary's entire
+# 12-point score was these artifacts (monitor-DLL ImageLoad + apitrace pipe
+# genuinely in-lineage; EdgeUpdate/WMI health-probe adopted via recycled PID).
+# ---------------------------------------------------------------------------
+
+def _alert(source, event_type, data, in_scope=True):
+    return {"source": source, "event_type": event_type,
+            "in_sample_scope": in_scope, "data": data}
+
+
+def test_own_monitor_dll_imageload_suppressed():
+    a = _alert("sysmon", "ImageLoad", {
+        "Image": "C:\\Windows\\System32\\cmd.exe",
+        "ImageLoaded": "C:\\SandboxAgent\\monitor_x64.dll",
+        "ProcessId": "3396", "ProcessGuid": "{9ff8e9dc-66de-6aa1-5001-000000003400}"})
+    out = reporting._suppress_os_noise_scope_leaks([a])
+    assert out[0]["in_sample_scope"] is False
+    assert "tooling" in out[0]["scope_reason"]
+
+
+def test_apitrace_pipe_suppressed():
+    a = _alert("sysmon", "PipeConnected", {
+        "Image": "C:\\Windows\\System32\\cmd.exe", "PipeName": "\\sandbox_apitrace",
+        "ProcessId": "3396", "ProcessGuid": "{9ff8e9dc-66de-6aa1-5001-000000003400}"})
+    out = reporting._suppress_os_noise_scope_leaks([a])
+    assert out[0]["in_sample_scope"] is False
+
+
+def test_os_noise_image_pid_adoption_suppressed():
+    # GUID-less EID 10 from a recycled pid now held by the Edge updater.
+    a = _alert("sysmon", "ProcessAccess", {
+        "SourceImage": "C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe",
+        "TargetImage": "C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe",
+        "SourceProcessId": "9152", "GrantedAccess": "0x1410"})
+    out = reporting._suppress_os_noise_scope_leaks([a])
+    assert out[0]["in_sample_scope"] is False
+    assert "os-noise" in out[0]["scope_reason"]
+
+
+def test_wmi_health_probe_suppressed():
+    a = _alert("wmi_etw", "WmiTemporaryConsumer", {
+        "ProcessId": 3972, "User": "NT AUTHORITY\\LOCAL SERVICE",
+        "Query": "SELECT * FROM __InstanceOperationEvent WHERE TargetInstance ISA 'AntiVirusProduct'"})
+    out = reporting._suppress_os_noise_scope_leaks([a])
+    assert out[0]["in_sample_scope"] is False
+    assert "health-probe" in out[0]["scope_reason"]
+
+
+def test_real_sample_activity_untouched():
+    # Malware loading its own DLL from TEMP: same event type as the tooling
+    # case but not our artifact -> stays in scope.
+    a = _alert("sysmon", "ImageLoad", {
+        "Image": "C:\\Sandbox\\sample.exe",
+        "ImageLoaded": "C:\\Users\\gigi\\AppData\\Local\\Temp\\evil.dll",
+        "ProcessId": "3396"})
+    # Malware AV-discovery query (plain SELECT, user context): stays in scope.
+    b = _alert("wmi_etw", "WmiTemporaryConsumer", {
+        "ProcessId": 3396, "User": "DESKTOP-RO2VL5M\\gigi",
+        "Query": "SELECT * FROM AntiVirusProduct"})
+    # GUID-carrying alert from a noise image: the guid path is trusted by
+    # construction, the pass only touches GUID-less pid adoption.
+    c = _alert("sysmon", "ProcessAccess", {
+        "SourceImage": "C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe",
+        "SourceProcessId": "9152",
+        "SourceProcessGuid": "{9ff8e9dc-66de-6aa1-5001-000000009999}"})
+    out = reporting._suppress_os_noise_scope_leaks([a, b, c])
+    assert all(x["in_sample_scope"] is True for x in out)
+    assert all("scope_reason" not in x for x in out)
+
+
+# ---------------------------------------------------------------------------
+# Monitor-injection / staging artifact suppression (2026-09-11): the goodware
+# FP hunt found a trivial hello-world exe scoring malicious/42 purely on the
+# loader's own hook injection (EID 10 + ApitraceInjectionChain) and a Sigma
+# "suspicious extension" rule firing on our extensionless staged filename.
+# ---------------------------------------------------------------------------
+
+_LOADER_PROCCREATE = {
+    "event_type": "ProcessCreate",
+    "data": {"Image": "C:\\SandboxAgent\\monitor_loader_x86.exe", "ProcessId": "10628"},
+}
+
+
+def test_loader_processaccess_suppressed():
+    a = _alert("sysmon", "ProcessAccess", {
+        "SourceImage": "C:\\SandboxAgent\\monitor_loader_x86.exe",
+        "TargetImage": "C:\\Sandbox\\9b3f1e32",
+        "SourceProcessId": "10628", "TargetProcessId": "7520",
+        "GrantedAccess": "0x1fffff"})
+    out = reporting._suppress_monitor_injection_artifacts([a], [], None)
+    assert out[0]["in_sample_scope"] is False
+    assert "tooling" in out[0]["scope_reason"]
+
+
+def test_loader_apitrace_injection_chain_suppressed():
+    # Behavioral signature synthesized from the loader pid's own API calls.
+    a = _alert("apitrace", "ApitraceInjectionChain", {
+        "ProcessId": 10628, "TargetProcessId": 7520,
+        "Type": "Write into remote process 7520 followed by thread start/resume"})
+    out = reporting._suppress_monitor_injection_artifacts([a], [_LOADER_PROCCREATE], None)
+    assert out[0]["in_sample_scope"] is False
+
+
+def test_sample_apitrace_injection_chain_kept():
+    # Same signature, but attributed to a NON-tooling pid: real injection.
+    a = _alert("apitrace", "ApitraceInjectionChain", {
+        "ProcessId": 7520, "TargetProcessId": 9000,
+        "Type": "Write into remote process 9000 followed by thread start/resume"})
+    out = reporting._suppress_monitor_injection_artifacts([a], [_LOADER_PROCCREATE], None)
+    assert out[0]["in_sample_scope"] is True
+
+
+def test_child_injection_eid10_pair_suppressed():
+    # Monitor child-following: hooked cmd.exe opens its new child (EID 10) and
+    # fires the tooling EID 8 (LoadLibraryW VA) into the same child. The EID 10
+    # is the same injection's process-open sibling.
+    events = [_guardian_meta()]
+    eid8 = {
+        "event_type": "CreateRemoteThread", "in_sample_scope": False,
+        "data": {"SourceProcessId": "7108", "TargetProcessId": "9112",
+                 "StartAddress": "0x00007FF90EA8FEE0"},
+    }
+    eid10 = _alert("sysmon", "ProcessAccess", {
+        "SourceImage": "C:\\Windows\\System32\\cmd.exe",
+        "TargetImage": "C:\\Windows\\system32\\certutil.exe",
+        "SourceProcessId": "7108", "TargetProcessId": "9112",
+        "GrantedAccess": "0x1fffff"})
+    out = reporting._suppress_monitor_injection_artifacts([eid8, eid10], events, None)
+    assert out[0]["in_sample_scope"] is False  # unchanged (already flipped)
+    assert out[1]["in_sample_scope"] is False
+    assert "child-following" in out[1]["scope_reason"]
+
+
+def test_unpaired_processaccess_kept():
+    # EID 10 with no matching tooling EID 8: real cross-process access.
+    events = [_guardian_meta()]
+    a = _alert("sysmon", "ProcessAccess", {
+        "SourceImage": "C:\\Sandbox\\sample.exe",
+        "TargetImage": "C:\\Windows\\System32\\lsass.exe",
+        "SourceProcessId": "7108", "TargetProcessId": "700",
+        "GrantedAccess": "0x1fffff"})
+    out = reporting._suppress_monitor_injection_artifacts([a], events, None)
+    assert out[0]["in_sample_scope"] is True
+
+
+def test_staging_extension_sigma_suppressed_on_staged_path():
+    a = _alert("sigma", "ProcessCreate", {
+        "Image": "C:\\Sandbox\\9b3f1e32e9ba2728b53fe615a49540734fa7c95b8d98ead7e1b99952d6c28c7a"})
+    a["sigma"] = {"id": "c09dad97-1c78-4f71-b127-7edb2b8e491a",
+                  "title": "Execution of Suspicious File Type Extension"}
+    ei = {"Path": "C:\\Sandbox\\9b3f1e32e9ba2728b53fe615a49540734fa7c95b8d98ead7e1b99952d6c28c7a"}
+    out = reporting._suppress_monitor_injection_artifacts([a], [], ei)
+    assert out[0]["in_sample_scope"] is False
+    assert "staging" in out[0]["scope_reason"]
+
+
+def test_staging_extension_sigma_kept_on_other_path():
+    # Same rule firing on a DIFFERENT image (e.g. a dropped extensionless
+    # payload the sample itself launched): not our staging, stays in scope.
+    a = _alert("sigma", "ProcessCreate", {
+        "Image": "C:\\Users\\gigi\\AppData\\Local\\Temp\\payload"})
+    a["sigma"] = {"id": "c09dad97-1c78-4f71-b127-7edb2b8e491a",
+                  "title": "Execution of Suspicious File Type Extension"}
+    ei = {"Path": "C:\\Sandbox\\9b3f1e32"}
+    out = reporting._suppress_monitor_injection_artifacts([a], [], ei)
+    assert out[0]["in_sample_scope"] is True
+
+
+def test_dump_yara_interpreter_rules_excluded():
+    dumps = {"enabled": True, "items": [{
+        "filename": "sample_0000.dmp",
+        "yara_matches": [
+            {"rule": "suspicious_powershell_download", "tags": []},
+            {"rule": "suspicious_cmd_commands", "tags": []},
+            {"rule": "suspicious_urls", "tags": []},
+        ]}]}
+    alerts = heuristics.detect_dump_yara_matches(dumps)
+    rules = [a["data"]["Rule"] for a in alerts]
+    assert rules == ["suspicious_urls"]  # only the dump-meaningful rule survives

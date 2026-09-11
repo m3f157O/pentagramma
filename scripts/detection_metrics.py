@@ -33,12 +33,16 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from orchestrator.config import get_config  # noqa: E402
 from scripts.replay_detection import build_sigma_engine, load_report_file, replay_detection_only  # noqa: E402
+from scripts.label_from_manifests import _report_identity_head  # noqa: E402
 
 LABELS_PATH = PROJECT_ROOT / "tests" / "corpus" / "labels.json"
 SPLITS_PATH = PROJECT_ROOT / "tests" / "corpus" / "splits.json"
 
 # Verdict bands, worst-first.
 BANDS = ["malicious", "suspicious", "clean"]
+# Benign samples whose behavior deliberately touches watched surfaces -- see
+# compute_metrics(). Suspicious is tolerated for these; malicious is not.
+BOUNDARY_FAMILY = "goodware_boundary"
 # "flagged" thresholds: which predicted bands count as a positive detection.
 THRESHOLDS = {
     "malicious-only": {"malicious"},
@@ -112,47 +116,62 @@ def score_corpus(reports_dir: Path, labels: List[Dict[str, Any]], sigma_engine) 
     run redone later) contributes only its LATEST report (by report
     timestamp); earlier ones are excluded from scoring and reported as
     'superseded'. Reports matched by an explicit report-id label are always
-    kept -- that label deliberately names a specific run."""
+    kept -- that label deliberately names a specific run.
+
+    MEMORY: identity/supersession runs on 64 KB report HEADS only
+    (_report_identity_head); full reports are parsed one at a time in the
+    replay loop and dropped immediately. Holding every parsed report in a
+    candidates list was measured at ~130 MB x N reports (19.5 GB RSS over
+    the 152-report corpus) -- the corpus gate OOM-starved the analysis VM.
+    """
     labels_index = _index_labels(labels)
-    candidates: List[Tuple[Dict[str, Any], str, Optional[str], Optional[str], Dict[str, Any], bool]] = []
+    # Pass 1 (head-only): identify + label-match + supersede, no full parses.
+    candidates: List[Tuple[Path, str, Optional[str], Optional[str], str, Dict[str, Any], bool]] = []
     for path in sorted(reports_dir.glob("*.json")):
-        report = load_report_file(path)
-        if report is None:
+        if path.stem.endswith(".summary"):
             continue
-        rid, sha, fn = _report_identity(report, path.stem)
-        label = _match_label(labels_index, rid, sha, fn)
+        rid = path.stem
+        sha, ts, fn = _report_identity_head(path)
+        label = _match_label(labels_index, rid, sha or None, fn or None)
         if label is None:
             continue  # unlabeled -> not part of the measured corpus
-        candidates.append((report, rid, sha, fn, label, rid in labels_index["report"]))
+        candidates.append((path, rid, sha or None, fn or None, ts, label, rid in labels_index["report"]))
 
     # Latest report wins per sample sha256 (unless an explicit report-id label
     # pins a specific run).
-    latest_by_sha: Dict[str, Tuple[Dict[str, Any], str, Optional[str], Optional[str], Dict[str, Any], bool]] = {}
+    latest_by_sha: Dict[str, Tuple[Path, str, Optional[str], Optional[str], str, Dict[str, Any], bool]] = {}
     superseded: List[Dict[str, Any]] = []
-    kept: List[Tuple[Dict[str, Any], str, Optional[str], Optional[str], Dict[str, Any], bool]] = []
+    kept: List[Tuple[Path, str, Optional[str], Optional[str], str, Dict[str, Any], bool]] = []
     for item in candidates:
-        report, rid, sha, fn, label, explicit = item
+        path, rid, sha, fn, ts, label, explicit = item
         if explicit or not sha:
             kept.append(item)
             continue
         current = latest_by_sha.get(sha)
-        if current is None or (report.get("timestamp") or "") >= (current[0].get("timestamp") or ""):
+        if current is None or ts >= current[4]:
             if current is not None:
                 superseded.append({"id": current[1], "filename": current[3], "sha256": sha,
-                                   "label": current[4]["label"], "superseded_by": rid})
+                                   "label": current[5]["label"], "superseded_by": rid})
             latest_by_sha[sha] = item
         else:
             superseded.append({"id": rid, "filename": fn, "sha256": sha,
                                "label": label["label"], "superseded_by": latest_by_sha[sha][1]})
     kept.extend(latest_by_sha.values())
 
+    # Pass 2: parse + replay only the kept reports, one at a time.
     scored: List[Dict[str, Any]] = []
-    for report, rid, sha, fn, label, _explicit in kept:
+    for path, rid, sha, fn, _ts, label, _explicit in kept:
+        report = load_report_file(path)
+        if report is None:
+            scored.append({"id": rid, "filename": fn, "label": label["label"], "error": "unparseable report"})
+            continue
         try:
             det = replay_detection_only(report, sigma_engine)
         except Exception as exc:
             scored.append({"id": rid, "filename": fn, "label": label["label"], "error": str(exc)})
             continue
+        finally:
+            del report
         verdict = det.get("verdict", {}) or {}
         scored.append({
             "id": rid,
@@ -164,6 +183,7 @@ def score_corpus(reports_dir: Path, labels: List[Dict[str, Any]], sigma_engine) 
             "score": verdict.get("score"),
             "top_reasons": [r.get("reason") for r in verdict.get("top_reasons", [])],
         })
+        del det
     scored.extend(superseded)
     return scored
 
@@ -208,11 +228,20 @@ def compute_metrics(scored: List[Dict[str, Any]]) -> Dict[str, Any]:
     for s in valid:
         confusion[s["label"]][s["predicted"]] += 1
 
-    # Precision/recall/FPR at each threshold.
+    # Precision/recall/FPR at each threshold. goodware_boundary samples are
+    # attack-shaped goodware that deliberately pokes watched surfaces
+    # (certutil encode, schtasks lifecycle, recon readouts) -- in a hostile-
+    # input sandbox, "suspicious" on those is the detector WORKING, so they
+    # are excluded from the suspicious-or-worse FPR entirely. They still
+    # count at the malicious threshold: benign reaching "malicious" is a
+    # true false positive there regardless of tier.
     threshold_metrics: Dict[str, Any] = {}
     for name, flagged_bands in THRESHOLDS.items():
         tp = fp = fn = tn = 0
         for s in valid:
+            if name == "suspicious-or-worse" and s["label"] == "benign" \
+                    and s.get("family") == BOUNDARY_FAMILY:
+                continue
             flagged = s["predicted"] in flagged_bands
             if s["label"] == "malicious":
                 tp += flagged
@@ -221,6 +250,13 @@ def compute_metrics(scored: List[Dict[str, Any]]) -> Dict[str, Any]:
                 fp += flagged
                 tn += not flagged
         threshold_metrics[name] = _rates(tp, fp, fn, tn)
+
+    # Boundary tier: suspicious is tolerated, malicious is a violation.
+    boundary = [s for s in valid if s["label"] == "benign" and s.get("family") == BOUNDARY_FAMILY]
+    boundary_violations = [
+        {"id": s["id"], "predicted": s["predicted"], "score": s.get("score"), "top_reasons": s["top_reasons"][:3]}
+        for s in boundary if s["predicted"] == "malicious"
+    ]
 
     # Per-family detection (fraction reaching at least "suspicious").
     family_stats: Dict[str, Dict[str, int]] = defaultdict(lambda: {"total": 0, "detected": 0})
@@ -232,10 +268,12 @@ def compute_metrics(scored: List[Dict[str, Any]]) -> Dict[str, Any]:
         if s["predicted"] in THRESHOLDS["suspicious-or-worse"]:
             family_stats[fam]["detected"] += 1
 
-    # False-positive drivers: reasons that fired on benign samples flagged >= suspicious.
+    # False-positive drivers: reasons that fired on NEUTRAL benign samples
+    # flagged >= suspicious (boundary samples are expected to light up).
     fp_drivers: Counter = Counter()
     for s in valid:
-        if s["label"] == "benign" and s["predicted"] in THRESHOLDS["suspicious-or-worse"]:
+        if (s["label"] == "benign" and s.get("family") != BOUNDARY_FAMILY
+                and s["predicted"] in THRESHOLDS["suspicious-or-worse"]):
             for reason in s["top_reasons"]:
                 fp_drivers[reason] += 1
 
@@ -250,6 +288,12 @@ def compute_metrics(scored: List[Dict[str, Any]]) -> Dict[str, Any]:
         "confusion": {k: dict(v) for k, v in confusion.items()},
         "thresholds": threshold_metrics,
         "families": {k: v for k, v in sorted(family_stats.items())},
+        "boundary": {
+            "total": len(boundary),
+            "suspicious_ok": sum(1 for s in boundary if s["predicted"] == "suspicious"),
+            "clean": sum(1 for s in boundary if s["predicted"] == "clean"),
+            "violations": boundary_violations,
+        },
         "fp_drivers": fp_drivers.most_common(),
         "errors": [{"id": e["id"], "error": e["error"]} for e in errors],
     }
@@ -300,6 +344,13 @@ def render_text(m: Dict[str, Any]) -> str:
         lines += ["", "False-positive drivers (reasons on flagged benign runs):"]
         for reason, n in m["fp_drivers"]:
             lines.append(f"  {n:>3}x  {reason}")
+    bnd = m.get("boundary") or {}
+    if bnd.get("total"):
+        lines += ["", f"Boundary goodware: {bnd['total']} samples "
+                      f"({bnd.get('suspicious_ok', 0)} suspicious-ok, {bnd.get('clean', 0)} clean, "
+                      f"{len(bnd.get('violations') or [])} reached MALICIOUS = violation)"]
+        for v in (bnd.get("violations") or [])[:10]:
+            lines.append(f"  VIOLATION {v['id']}: {v['predicted']}/{v.get('score')} {v['top_reasons']}")
     if m["errors"]:
         lines += ["", f"Replay errors: {len(m['errors'])}"]
         for e in m["errors"][:10]:

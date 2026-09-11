@@ -36,7 +36,7 @@ Operational knowledge for the Hyper-V malware sandbox (this repo). For interpret
 
 After ANY change to the detection pipeline (detectors, behavioral signatures, sigma/CAPE/YARA rules, scoring, monitor/hookset):
 
-1. Detonate the benign pair: `test-sample.bat` and `test-tier1-crypto.ps1`. Both must stay `suspicious` with **zero behavioral (apitrace) alerts**. Expected score: **12** (three weight-4 launcher artifacts: PipeConnected/ImageLoad/CreateRemoteThread), or **37** when Defender's AMSI self-test (`Virus:Win32/MpTest!amsi`, +25) happens to fire inside the run window — probabilistic, out of scope.
+1. Detonate the benign pair: `test-sample.bat` and `test-tier1-crypto.ps1`. Both must stay `clean` with **zero behavioral (apitrace) alerts**. Expected score: **0** (the three weight-4 launcher artifacts — own monitor-DLL ImageLoad, apitrace pipe, recycled-PID OS noise — were de-scoped on 2026-09-11 by `reporting._suppress_os_noise_scope_leaks`; pre-change contract was 12, or 37 when Defender's AMSI self-test fired). Any score above 0 = investigate the new `scope_reason`-less in-scope alerts first.
 2. Detonate `InjectionHarness.exe`. It must stay `malicious/90`.
 3. Cross-check guest runs offline: `python scripts\replay_detection.py <id> --json`. The running server may execute stale code (pending restart); replay always uses on-disk code. Divergence = stale server, not a detection change.
 4. Run the relevant test scripts (see below).

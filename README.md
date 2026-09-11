@@ -96,14 +96,20 @@ per `config.yaml` + autologon, PowerShell Direct working), run elevated:
 
 ```powershell
 .\scripts\provision_golden_image.ps1 -PythonInstaller C:\path\python-3.11.x-amd64.exe
-# skips available: -SkipPython -SkipDressing -SkipGuardian -DefenderOff; -Force recaptures an existing SANDBOX_READY
+# skips available: -SkipPython -SkipDressing -SkipNoiseReduction -SkipGuardian -DefenderOff; -Force recaptures an existing SANDBOX_READY
 ```
 
 It boots the VM and verify-gates each step: guest Python 3.11 (silent install), agent
 deploy to `C:\SandboxAgent`, pip requirements, Sysmon install, audit policy + PowerShell
-logging, environment dressing, Defender posture, SandboxGuard driver — then captures
+logging, environment dressing, OS noise reduction (`agent\windows\apply_noise_reduction.py` —
+disables updater/telemetry/CEIP/indexer tasks+services; Defender and wuauserv stay),
+Defender posture, SandboxGuard driver — then captures
 `SANDBOX_READY` only if every verification passes. Manual steps it does NOT do: VM
 creation/OS install, user + autologon setup, WDAC/Code-Integrity policy (warns only).
+
+To apply noise reduction to an ALREADY-provisioned image without full reprovisioning:
+`POST /api/vm/provision-noise-reduction` (same verify-gated recapture pattern as
+`provision-dressing`).
 
 To just (re)capture the snapshot of an already-prepared VM, shut it down cleanly and run:
 

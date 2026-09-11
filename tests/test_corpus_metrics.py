@@ -14,6 +14,13 @@ detection change:
 Floors are conservative gross-regression catchers, well below the current
 pipeline's numbers (recall(susp+)=1.0, precision(mal)=1.0, FPR=0.0 as of the
 detection_tests corpus). Tighten them as the corpus grows with real goodware.
+
+Goodware tiers (2026-09-11): neutral goodware (family "goodware") must be
+clean -- it feeds the FPR floor. Boundary goodware (family
+"goodware_boundary") deliberately pokes watched surfaces (certutil, schtasks,
+recon); this is a hostile-input sandbox that stays aggressive by design, so
+"suspicious" there is the detector WORKING -- only a "malicious" verdict on
+them counts as a false positive (MAX_BOUNDARY_MALICIOUS).
 """
 
 import sys
@@ -30,6 +37,7 @@ from scripts.replay_detection import build_sigma_engine  # noqa: E402
 MIN_RECALL_SUSPICIOUS_PLUS = 0.90   # every malicious sample should reach >= suspicious
 MIN_PRECISION_MALICIOUS = 0.90      # a "malicious" verdict should almost never be a benign
 MAX_FPR_SUSPICIOUS_PLUS = 0.20      # benign flagged >= suspicious should be rare
+MAX_BOUNDARY_MALICIOUS = 0          # attack-shaped goodware may be suspicious, NEVER malicious
 MIN_CORPUS = 20                     # below this, skip rather than assert on noise
 
 
@@ -73,9 +81,15 @@ def main() -> None:
         f"fpr(suspicious+) {fpr_sp:.3f} > ceiling {MAX_FPR_SUSPICIOUS_PLUS} -- false positives spiked"
     assert precision_mo >= MIN_PRECISION_MALICIOUS, \
         f"precision(malicious) {precision_mo:.3f} < floor {MIN_PRECISION_MALICIOUS} -- benign mislabeled malicious"
+    boundary_violations = m.get("boundary", {}).get("violations", [])
+    assert len(boundary_violations) <= MAX_BOUNDARY_MALICIOUS, \
+        f"{len(boundary_violations)} boundary goodware reached MALICIOUS (allowed: suspicious): {boundary_violations}"
 
+    bnd = m.get("boundary", {})
     print(f"PASS [{split_name}]: {len(valid)} runs | recall(susp+)={recall_sp:.3f}{_fmt_ci(sp['recall_ci'])} "
-          f"fpr(susp+)={fpr_sp:.3f}{_fmt_ci(sp['fpr_ci'])} precision(mal)={precision_mo:.3f}{_fmt_ci(mo['precision_ci'])}")
+          f"fpr(susp+)={fpr_sp:.3f}{_fmt_ci(sp['fpr_ci'])} precision(mal)={precision_mo:.3f}{_fmt_ci(mo['precision_ci'])} "
+          f"| boundary: {bnd.get('total', 0)} samples, {bnd.get('suspicious_ok', 0)} suspicious-ok, "
+          f"{len(boundary_violations)} violations")
 
 
 if __name__ == "__main__":

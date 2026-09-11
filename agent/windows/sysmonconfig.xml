@@ -10,10 +10,48 @@
       </ProcessCreate>
     </RuleGroup>
 
+    <!-- OS-noise excludes: updaters/telemetry/indexer processes that churn the
+         log during every analysis but carry no detection value. Full fixed
+         paths use "is"; updater binaries that run from staging dirs (Edge
+         Update runs from Program Files (x86)\Microsoft\Temp\*.tmp) use
+         "end with"; their real homes are admin-protected, and any malware
+         masquerading under these names from a user-writable path is still
+         caught by the orchestrator's OS-noise attribution pass, which only
+         ever DE-scopes, never hides. Dual-use hosts (svchost, services.exe,
+         WmiPrvSE, MsMpEng, rundll32, regsvr32, OneDrive.exe) deliberately
+         stay included. -->
+    <RuleGroup name="ProcessCreate" groupRelation="or">
+      <ProcessCreate onmatch="exclude">
+        <Image condition="is">C:\Windows\System32\CompatTelRunner.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchIndexer.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchProtocolHost.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchFilterHost.exe</Image>
+        <Image condition="end with">\MicrosoftEdgeUpdate.exe</Image>
+        <Image condition="end with">\OneDriveSetup.exe</Image>
+        <Image condition="end with">\OneDriveStandaloneUpdater.exe</Image>
+        <Image condition="end with">\TiWorker.exe</Image>
+        <Image condition="end with">\MoUSOCoreWorker.exe</Image>
+      </ProcessCreate>
+    </RuleGroup>
+
     <!-- Process termination -->
     <RuleGroup name="ProcessTerminate" groupRelation="or">
       <ProcessTerminate onmatch="include">
         <Image condition="contains">\</Image>
+      </ProcessTerminate>
+    </RuleGroup>
+
+    <RuleGroup name="ProcessTerminate" groupRelation="or">
+      <ProcessTerminate onmatch="exclude">
+        <Image condition="is">C:\Windows\System32\CompatTelRunner.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchIndexer.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchProtocolHost.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchFilterHost.exe</Image>
+        <Image condition="end with">\MicrosoftEdgeUpdate.exe</Image>
+        <Image condition="end with">\OneDriveSetup.exe</Image>
+        <Image condition="end with">\OneDriveStandaloneUpdater.exe</Image>
+        <Image condition="end with">\TiWorker.exe</Image>
+        <Image condition="end with">\MoUSOCoreWorker.exe</Image>
       </ProcessTerminate>
     </RuleGroup>
 
@@ -55,6 +93,15 @@
       <ImageLoad onmatch="exclude">
         <Image condition="end with">\Sysmon64.exe</Image>
         <Image condition="end with">\wevtutil.exe</Image>
+        <Image condition="is">C:\Windows\System32\CompatTelRunner.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchIndexer.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchProtocolHost.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchFilterHost.exe</Image>
+        <Image condition="end with">\MicrosoftEdgeUpdate.exe</Image>
+        <Image condition="end with">\OneDriveSetup.exe</Image>
+        <Image condition="end with">\OneDriveStandaloneUpdater.exe</Image>
+        <Image condition="end with">\TiWorker.exe</Image>
+        <Image condition="end with">\MoUSOCoreWorker.exe</Image>
       </ImageLoad>
     </RuleGroup>
 
@@ -110,6 +157,20 @@
       </FileCreate>
     </RuleGroup>
 
+    <!-- Same OS-noise exclusion as ProcessCreate: setup/updater file churn
+         (OneDriveSetup alone wrote 270 files during one benign canary run).
+         FileDelete stays unfiltered: deletes are high-signal. -->
+    <RuleGroup name="FileCreate" groupRelation="or">
+      <FileCreate onmatch="exclude">
+        <Image condition="is">C:\Windows\System32\CompatTelRunner.exe</Image>
+        <Image condition="end with">\MicrosoftEdgeUpdate.exe</Image>
+        <Image condition="end with">\OneDriveSetup.exe</Image>
+        <Image condition="end with">\OneDriveStandaloneUpdater.exe</Image>
+        <Image condition="end with">\TiWorker.exe</Image>
+        <Image condition="end with">\MoUSOCoreWorker.exe</Image>
+      </FileCreate>
+    </RuleGroup>
+
     <!-- Alternate data stream creation (ADS hiding, mark-of-the-web bypass) -->
     <RuleGroup name="FileCreateStreamHash" groupRelation="or">
       <FileCreateStreamHash onmatch="include">
@@ -154,6 +215,23 @@
     <RuleGroup name="RegistryEvent" groupRelation="or">
       <RegistryEvent onmatch="include">
         <Image condition="contains">\</Image>
+      </RegistryEvent>
+    </RuleGroup>
+
+    <!-- OS-noise registry churn (66% of all events in a typical run). svchost
+         stays included: service-persistence writes (T1543.003) are svchost/
+         services.exe registry activity and must not be blinded. -->
+    <RuleGroup name="RegistryEvent" groupRelation="or">
+      <RegistryEvent onmatch="exclude">
+        <Image condition="is">C:\Windows\System32\CompatTelRunner.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchIndexer.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchProtocolHost.exe</Image>
+        <Image condition="is">C:\Windows\System32\SearchFilterHost.exe</Image>
+        <Image condition="end with">\MicrosoftEdgeUpdate.exe</Image>
+        <Image condition="end with">\OneDriveSetup.exe</Image>
+        <Image condition="end with">\OneDriveStandaloneUpdater.exe</Image>
+        <Image condition="end with">\TiWorker.exe</Image>
+        <Image condition="end with">\MoUSOCoreWorker.exe</Image>
       </RegistryEvent>
     </RuleGroup>
 

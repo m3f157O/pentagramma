@@ -13,9 +13,10 @@
 #
 # Everything else is automated and verify-gated: guest Python 3.11 (via
 # -PythonInstaller), agent deploy, pip deps, Sysmon, audit policy + PS logging
-# (Telemetry-Init), environment dressing, Defender state, SandboxGuard driver
-# (via guardian\install_guardian.ps1 -NoRestore -NoRecapture). The snapshot is
-# captured ONLY if every verification passes.
+# (Telemetry-Init), environment dressing, OS noise reduction (updaters,
+# telemetry, CEIP, indexer via apply_noise_reduction.py), Defender state,
+# SandboxGuard driver (via guardian\install_guardian.ps1 -NoRestore
+# -NoRecapture). The snapshot is captured ONLY if every verification passes.
 #
 # Usage (elevated):
 #   powershell -ExecutionPolicy Bypass -File scripts\provision_golden_image.ps1 `
@@ -30,6 +31,7 @@ param(
     [string]$PythonInstaller = "",
     [switch]$SkipPython,
     [switch]$SkipDressing,
+    [switch]$SkipNoiseReduction,
     [switch]$SkipGuardian,
     # Default posture (per README): Defender ON as AMSI provider. This switch
     # disables it instead (verify-gated, Tamper Protection may block).
@@ -184,6 +186,15 @@ if (-not $SkipDressing) {
     if ($r.ExitCode -ne 0) { throw "dressing verify failed: $($r.Output)" }
 }
 
+# --- OS noise reduction -------------------------------------------------------------
+if (-not $SkipNoiseReduction) {
+    Step "OS noise reduction (updaters, telemetry, CEIP, indexer)"
+    $r = Invoke-HvJson "Invoke-GuestPython" @("-ScriptName", "apply_noise_reduction.py", "-ScriptArgs", "apply")
+    if ($r.ExitCode -ne 0) { throw "noise-reduction apply failed: $($r.Output)" }
+    $r = Invoke-HvJson "Invoke-GuestPython" @("-ScriptName", "apply_noise_reduction.py", "-ScriptArgs", "verify")
+    if ($r.ExitCode -ne 0) { throw "noise-reduction verify failed: $($r.Output)" }
+}
+
 # --- Defender ---------------------------------------------------------------------
 Step "Defender posture"
 $r = Invoke-HvJson "Invoke-GuestPython" @("-ScriptName", "defender_manager.py", "-ScriptArgs", "status")
@@ -216,6 +227,10 @@ if ($r.Output -notmatch "running" -or $r.Output -match "not running") { $failure
 if (-not $SkipDressing) {
     $r = Invoke-HvJson "Invoke-GuestPython" @("-ScriptName", "apply_dressing.py", "-ScriptArgs", "verify")
     if ($r.ExitCode -ne 0) { $failures += "dressing verify failed" }
+}
+if (-not $SkipNoiseReduction) {
+    $r = Invoke-HvJson "Invoke-GuestPython" @("-ScriptName", "apply_noise_reduction.py", "-ScriptArgs", "verify")
+    if ($r.ExitCode -ne 0) { $failures += "noise-reduction verify failed" }
 }
 if (-not $DefenderOff) {
     $r = Invoke-HvJson "Invoke-GuestPython" @("-ScriptName", "defender_manager.py", "-ScriptArgs", "verify-on")
