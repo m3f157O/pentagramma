@@ -19,18 +19,24 @@ verify T1566.001/T1047 aren't parser bugs, then new Sigma rules (AD discovery,
 remote schtasks, LocalAccountTokenFilterPolicy, PhysicalDrive, ransom notes),
 target ≥90% excl. out-of-scope.
 
-## 5. Adaptive detonation window — IMPLEMENTED + COMMITTED (`735ca57`), live validation pending
-Track whole sample tree (WMI BFS @1Hz); exit-stop on empty tree; idle-stop when
-apitrace JSONL silent past min_window (45s) + idle_grace (30s); final dump on
-idle-stop; kill whole tree; StoppedEarly (exit|idle|timeout) + AdaptiveWindowActive
-+ TreePidsMax in execution_info; config `analysis.adaptive_window` (enabled,
-gitignored — defaults preserve legacy behavior).
-Pending (VM now free — gate + attack-data runs done): canary benign_control
-(clean/0, exit-stop), InjectionHarness (90), staller (idle-stop early WITH final
-dump), then gate rerun.
+## 5. ~~Adaptive detonation window~~ — DONE 2026-09-11, live-validated; commit pending gate
+Full doc: `docs/adaptive-detonation-window.md`. Tree exit-stop w/ 30s floor,
+idle-stop on apitrace silence, injected-process adoption (collector --pids-file),
+final dump on idle-stop, descendant-only kill, StoppedEarly in execution_info.
+Live validation: canary clean/0 exit-stop (null-guard bug found+fixed: `$null`
+left in `-ne $null` guards on possibly-empty arrays), canary2 clean/8 (baseline
+class, accepted), harness 90 + TreePidsMax 19 / AdoptedPidsMax 36, staller
+idle-stop at 95s/300s WITH final dump.
+Remaining: corpus gate rerun (RUNNING) → commit+push.
 
 ## Deferred bugs
-- multi-file zip staging (side-loading malware + Sysinternals EULA blockers)
+- InjectionHarness `mapview` Sysmon gap (2026-09-11): victim process invisible to
+  Sysmon entirely (no ProcessCreate, no EID 8 for its pid; apitrace sees all).
+  Pre-existing (baseline a16ecb9e fails identically, 7/9 vs today 8/9). Detection
+  still covered via apitrace/behavioral (verdict 90). Suspect early-run event
+  burst + guest clock jump (snapshot-resume clock skew) or creation path Sysmon
+  misses. Assertion: EID 8 TargetProcessId=<victim> in harness_assertions.py.
+- ~~multi-file zip staging~~ → IMPLEMENTED 2026-09-11 (roadmap #3: sample_types.build_staging_zip + Copy-SampleFolderToVM + staging report section, 15 unit tests green); live validation pending gate
 - fc7a60ad NoneType crash
 - c7bbc23f zero-export DLL
 - agenttesla socket drops

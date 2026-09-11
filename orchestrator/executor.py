@@ -550,6 +550,7 @@ class SandboxExecutor:
         apitrace_collector_pid = 0
         apitrace_guest_file = bt_cfg.get("guest_apitrace_file", "C:\\SandboxAgent\\apitrace.jsonl")
         apitrace_stop_file = bt_cfg.get("guest_stop_file", "C:\\SandboxAgent\\apitrace_stop.flag")
+        apitrace_pids_guest_file = bt_cfg.get("guest_apitrace_pids_file", apitrace_guest_file + ".pids")
 
         # SandboxGuard kernel guardian (protect/verify/place). Fails open:
         # if the driver is absent in the guest, guardian_agent emits a
@@ -676,6 +677,7 @@ class SandboxExecutor:
                         output_file=apitrace_guest_file,
                         stop_file=apitrace_stop_file,
                         max_seconds=max(timeout + 60, 120),
+                        pids_file=apitrace_pids_guest_file,
                     )
                     apitrace_started = True
                     apitrace_collector_pid = at_result.get("CollectorPid", 0)
@@ -765,6 +767,10 @@ class SandboxExecutor:
                     activity_file_path=(
                         apitrace_guest_file if (aw_enabled and behavioral_tracing_enabled) else ""
                     ),
+                    adopted_pids_file=(
+                        apitrace_pids_guest_file if behavioral_tracing_enabled else ""
+                    ),
+                    min_runtime_seconds=aw_cfg.get("min_runtime_seconds", 30),
                 )
             # Surface the pre-launch Defender/AMSI readiness result alongside the
             # execution record so the report shows whether AMSI was armed.

@@ -76,6 +76,14 @@ analysis:
   default_timeout_seconds: 120
   vm_startup_timeout_seconds: 240
   defender_readiness_timeout_seconds: 90   # wait until AMSI is armed before detonating (0 disables)
+  # Adaptive detonation window (docs/adaptive-detonation-window.md): stop early
+  # when the whole sample tree (descendants + injected-into processes) is gone,
+  # or when a traced sample's apitrace goes silent past the minimum window.
+  adaptive_window:
+    enabled: true
+    min_window_seconds: 45     # earliest idle-stop consideration
+    idle_grace_seconds: 30     # apitrace silence required before idle-stop
+    min_runtime_seconds: 30    # hard floor even if the tree exits instantly
 
 telemetry:
   sources: [sysmon, amsi, powershell, security_log, system_log, defender_log]

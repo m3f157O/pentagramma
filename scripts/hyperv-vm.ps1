@@ -349,6 +349,20 @@ function Invoke-SampleExecution {
         [Parameter(Mandatory = $false)]
         [string]$ActivityFilePath = "",
 
+        # Apitrace attached-pids file (collector --pids-file): pids the
+        # monitor is attached to, including processes the sample INJECTED
+        # into. The wait-loop adopts them as extra tree roots so a
+        # sample that injects-and-exits still counts as alive (2026-09-11).
+        [Parameter(Mandatory = $false)]
+        [string]$AdoptedPidsFile = "",
+
+        # Hard floor on the detonation window (2026-09-11): even if the whole
+        # sample tree exits immediately, the run is not stopped before this
+        # many seconds -- collectors still get a baseline of post-exit
+        # telemetry (late Sysmon flush, dropped files landing, ...).
+        [Parameter(Mandatory = $false)]
+        [int]$MinRuntimeSeconds = 30,
+
         [Parameter(Mandatory = $false)]
         [string]$CredentialUsername,
 
@@ -359,7 +373,7 @@ function Invoke-SampleExecution {
     Assert-VMExists -VMName $VMName | Out-Null
 
     $scriptBlock = {
-        param($path, $launcherPath, $argumentString, $workingDirectory, $timeoutSeconds, $dumpsDir, $dumpIntervalSeconds, $maxDumps, $maxWorkingSetBytes, $pollIntervalMs, $behavioralTracing, $monitorDllPath, $monitorLoaderPath, $monitorPidFile, $monitorPidWaitSeconds, $adaptiveMinWindowSeconds, $adaptiveIdleGraceSeconds, $activityFilePath)
+        param($path, $launcherPath, $argumentString, $workingDirectory, $timeoutSeconds, $dumpsDir, $dumpIntervalSeconds, $maxDumps, $maxWorkingSetBytes, $pollIntervalMs, $behavioralTracing, $monitorDllPath, $monitorLoaderPath, $monitorPidFile, $monitorPidWaitSeconds, $adaptiveMinWindowSeconds, $adaptiveIdleGraceSeconds, $activityFilePath, $adoptedPidsFile, $minRuntimeSeconds)
         # NOTE: both streams must be drained asynchronously *before*
         # WaitForExit() -- redirecting both stdout+stderr and only reading
         # them after WaitForExit() is the classic .NET Process deadlock: the
@@ -541,7 +555,7 @@ public class MiniDumpNative {
         $treeRootPid = if ($tracedChildPid -ne $null) { $tracedChildPid } else { $proc.Id }
         $adaptiveActive = ($adaptiveMinWindowSeconds -gt 0 -and $activityFilePath -and $tracedChildPid -ne $null)
         function Get-SampleTreePids {
-            param([int]$RootPid)
+            param([int]$RootPid, [int[]]$AdditionalRoots = @())
             $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId -ErrorAction SilentlyContinue)
             $byParent = @{}
             foreach ($p in $all) {
@@ -552,6 +566,9 @@ public class MiniDumpNative {
             $found = @{}
             $queue = [System.Collections.Generic.Queue[int]]::new()
             $queue.Enqueue($RootPid)
+            # adopted roots: injected-into processes count for aliveness even
+            # though they are not descendants of the sample
+            foreach ($extra in $AdditionalRoots) { $queue.Enqueue($extra) }
             while ($queue.Count -gt 0) {
                 $cur = $queue.Dequeue()
                 if ($found.ContainsKey($cur)) { continue }
@@ -592,12 +609,31 @@ public class MiniDumpNative {
         $lastActivityAt = 0.0
         $nextActivityPollAt = $adaptiveMinWindowSeconds
         $treePidsMax = 0
+        $adoptedPidsSeen = 0
 
         while ($true) {
             $elapsedSeconds = $stopwatch.Elapsed.TotalSeconds
             if ($elapsedSeconds -ge $treeCheckAt) {
-                $refreshed = Get-SampleTreePids $treeRootPid
-                if ($refreshed -ne $null) {
+                # Adopt apitrace-attached pids (injection targets) as extra
+                # tree roots; exclude the loader itself ($proc.Id) -- it is
+                # tooling whose liveness must not hold the window open.
+                $adopted = @()
+                if ($adoptedPidsFile) {
+                    try {
+                        foreach ($line in (Get-Content -Path $adoptedPidsFile -ErrorAction Stop)) {
+                            $ap = 0
+                            if ([int]::TryParse($line.Trim(), [ref]$ap) -and $ap -gt 0 -and $ap -ne $proc.Id) { $adopted += $ap }
+                        }
+                    } catch {}
+                }
+                if ($adopted.Count -gt $adoptedPidsSeen) { $adoptedPidsSeen = $adopted.Count }
+                $refreshed = Get-SampleTreePids $treeRootPid $adopted
+                # NB: $null on the LEFT -- with an empty-array result, the
+                # filter semantics of "$refreshed -ne $null" yield @() (falsy)
+                # and the update would be skipped, freezing a stale non-empty
+                # tree forever (observed live 2026-09-11: canary idle-stopped
+                # instead of exit-stopping 3s after sample death).
+                if ($null -ne $refreshed) {
                     $treePids = @($refreshed)
                     $treeKnown = $true
                     if ($treePids.Count -gt $treePidsMax) { $treePidsMax = $treePids.Count }
@@ -608,14 +644,18 @@ public class MiniDumpNative {
             # roots at the sample (loader is tooling -- its exit/lingering is
             # irrelevant); untraced path roots at $proc, requiring $proc itself
             # gone too (belt-and-braces against a mid-spawn snapshot). Any CIM
-            # failure degrades to today's $proc.HasExited behavior.
+            # failure degrades to today's $proc.HasExited behavior. Gated on
+            # the minimum-runtime floor: an instantly-exiting tree still gets
+            # $minRuntimeSeconds of observation before we call it done.
+            $sampleGone = $false
             if (-not $treeKnown) {
-                if ($proc.HasExited) { $exited = $true; break }
+                if ($proc.HasExited) { $sampleGone = $true }
             } elseif ($tracedChildPid -ne $null) {
-                if ($treePids.Count -eq 0) { $exited = $true; break }
+                if ($treePids.Count -eq 0) { $sampleGone = $true }
             } elseif ($proc.HasExited -and $treePids.Count -eq 0) {
-                $exited = $true; break
+                $sampleGone = $true
             }
+            if ($sampleGone -and $elapsedSeconds -ge $minRuntimeSeconds) { $exited = $true; break }
             if ($elapsedSeconds -ge $timeoutSeconds) { break }
 
             # idle-stop: only on the traced path (the apitrace file is the
@@ -636,7 +676,8 @@ public class MiniDumpNative {
                 }
             }
 
-            if ($dumpsTaken -lt $maxDumps -and ($elapsedSeconds - $lastDumpSeconds) -ge $dumpIntervalSeconds) {
+            # no dump attempts against a dead tree (they only record failures)
+            if ($treePids.Count -gt 0 -and $dumpsTaken -lt $maxDumps -and ($elapsedSeconds - $lastDumpSeconds) -ge $dumpIntervalSeconds) {
                 try {
                     $attempt = Invoke-ProcessDump -Process $dumpTargetProcess -Index $dumpAttempts.Count -DumpsDir $dumpsDir `
                         -MaxWorkingSetBytes $maxWorkingSetBytes -ElapsedSeconds $elapsedSeconds -IsFinal $false
@@ -665,7 +706,10 @@ public class MiniDumpNative {
             # since a process that's still alive at analysis end is very likely
             # still holding unpacked payload in memory (doubly true for an
             # idle-stopped staller).
-            if (-not $proc.HasExited) {
+            # Final-dump guard: check the DUMP TARGET (via the tree), not
+            # $proc -- on the traced path the loader can exit long before the
+            # sample, and the live sample is exactly what we want to dump.
+            if ($treePids.Count -gt 0 -or -not $dumpTargetProcess.HasExited) {
                 try {
                     $finalAttempt = Invoke-ProcessDump -Process $dumpTargetProcess -Index $dumpAttempts.Count -DumpsDir $dumpsDir `
                         -MaxWorkingSetBytes $maxWorkingSetBytes -ElapsedSeconds $stopwatch.Elapsed.TotalSeconds -IsFinal $true
@@ -678,10 +722,15 @@ public class MiniDumpNative {
                 }
                 $dumpAttempts += $finalAttempt
             }
-            # kill the WHOLE tree (a persistent child must not survive the run),
-            # then wait on the launcher so ExitCode is safe to read below.
+            # kill the WHOLE DESCENDANT tree (a persistent child must not
+            # survive the run), then wait on the launcher so ExitCode is safe
+            # to read below. NB: descendants ONLY -- adopted injection-target
+            # hosts (explorer/svchost/...) extend the observation window but
+            # are deliberately NOT killed (killing an OS-critical host could
+            # take the guest down before telemetry is pulled; the per-run VM
+            # revert discards them anyway).
             $finalTree = Get-SampleTreePids $treeRootPid
-            if ($finalTree -ne $null) { $treePids = @($finalTree) }
+            if ($null -ne $finalTree) { $treePids = @($finalTree) }
             foreach ($treePid in $treePids) {
                 try {
                     $tp = [System.Diagnostics.Process]::GetProcessById([int]$treePid)
@@ -722,6 +771,7 @@ public class MiniDumpNative {
             StoppedEarly            = if ($exited) { 'exit' } elseif ($stoppedEarly) { $stoppedEarly } else { 'timeout' }
             AdaptiveWindowActive    = [bool]$adaptiveActive
             TreePidsMax             = $treePidsMax
+            AdoptedPidsMax          = $adoptedPidsSeen
             ProcessDumps            = $dumpAttempts
             BehavioralTracingActive = [bool]($behavioralTracing -and $tracedChildPid -ne $null)
         }
@@ -751,7 +801,7 @@ public class MiniDumpNative {
     $invokeArgs = @{
         VMName       = $VMName
         ScriptBlock  = $scriptBlock
-        ArgumentList = @($SamplePathInVM, $resolvedLauncherPath, $resolvedLauncherArguments, $resolvedWorkingDirectory, $TimeoutSeconds, $DumpsDir, $DumpIntervalSeconds, $MaxDumps, $MaxWorkingSetBytes, $PollIntervalMs, $BehavioralTracing.IsPresent, $MonitorDllPath, $MonitorLoaderPath, $MonitorPidFile, $MonitorPidWaitSeconds, $AdaptiveMinWindowSeconds, $AdaptiveIdleGraceSeconds, $ActivityFilePath)
+        ArgumentList = @($SamplePathInVM, $resolvedLauncherPath, $resolvedLauncherArguments, $resolvedWorkingDirectory, $TimeoutSeconds, $DumpsDir, $DumpIntervalSeconds, $MaxDumps, $MaxWorkingSetBytes, $PollIntervalMs, $BehavioralTracing.IsPresent, $MonitorDllPath, $MonitorLoaderPath, $MonitorPidFile, $MonitorPidWaitSeconds, $AdaptiveMinWindowSeconds, $AdaptiveIdleGraceSeconds, $ActivityFilePath, $AdoptedPidsFile, $MinRuntimeSeconds)
     }
     if ($cred) { $invokeArgs['Credential'] = $cred }
     return Invoke-Command @invokeArgs
@@ -1108,6 +1158,9 @@ function Invoke-ApitraceStart {
         [string]$StopFile = "C:\SandboxAgent\apitrace_stop.flag",
 
         [Parameter(Mandatory = $false)]
+        [string]$PidsFile = "",
+
+        [Parameter(Mandatory = $false)]
         [int]$MaxSeconds = 900,
 
         [Parameter(Mandatory = $false)]
@@ -1120,7 +1173,7 @@ function Invoke-ApitraceStart {
     Assert-VMExists -VMName $VMName | Out-Null
 
     $scriptBlock = {
-        param($agentDir, $outputFile, $stopFile, $maxSeconds)
+        param($agentDir, $outputFile, $stopFile, $maxSeconds, $pidsFile)
         $python = Join-Path $agentDir ".venv\Scripts\python.exe"
         if (-not (Test-Path $python)) {
             $python = 'C:\Python311\python.exe'
@@ -1131,11 +1184,13 @@ function Invoke-ApitraceStart {
         }
         $collector = Join-Path $agentDir "apitrace_collector.py"
         # Clear stale state from any prior (crashed/killed) run before starting.
-        foreach ($stale in @($outputFile, $stopFile)) {
-            if (Test-Path $stale) { Remove-Item -Path $stale -Force -ErrorAction SilentlyContinue }
+        foreach ($stale in @($outputFile, $stopFile, $pidsFile)) {
+            if ($stale -and (Test-Path $stale)) { Remove-Item -Path $stale -Force -ErrorAction SilentlyContinue }
         }
+        $collectorArgs = @($collector, '--out', $outputFile, '--stop-file', $stopFile, '--max-seconds', $maxSeconds, '--quiet')
+        if ($pidsFile) { $collectorArgs += @('--pids-file', $pidsFile) }
         $proc = Start-Process -FilePath $python `
-            -ArgumentList @($collector, '--out', $outputFile, '--stop-file', $stopFile, '--max-seconds', $maxSeconds, '--quiet') `
+            -ArgumentList $collectorArgs `
             -WindowStyle Hidden -PassThru
         # Give the pipe server a moment to bind before the sample (which
         # connects to it almost immediately after injection) launches.
@@ -1147,7 +1202,7 @@ function Invoke-ApitraceStart {
     $invokeArgs = @{
         VMName       = $VMName
         ScriptBlock  = $scriptBlock
-        ArgumentList = $AgentDir, $OutputFile, $StopFile, $MaxSeconds
+        ArgumentList = $AgentDir, $OutputFile, $StopFile, $MaxSeconds, $PidsFile
     }
     if ($cred) { $invokeArgs['Credential'] = $cred }
     return Invoke-Command @invokeArgs

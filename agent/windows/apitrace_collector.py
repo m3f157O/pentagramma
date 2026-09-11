@@ -68,9 +68,11 @@ class ApiTraceCollector:
     JSONL file. Thread-per-connection; one always-pending listener so a new
     child's monitor never races a closed pipe."""
 
-    def __init__(self, pipe_name: str, out_path: str, max_events: int = 0, quiet: bool = False):
+    def __init__(self, pipe_name: str, out_path: str, max_events: int = 0, quiet: bool = False,
+                 pids_path: Optional[str] = None):
         self.pipe_path = PIPE_PREFIX + pipe_name
         self.out_path = out_path
+        self.pids_path = pids_path
         self.max_events = max_events
         self.quiet = quiet
         self._stop = threading.Event()
@@ -79,11 +81,32 @@ class ApiTraceCollector:
         self._out = None
         self.event_count = 0
         self.connections = 0
+        # Distinct pids seen across all monitor connections (the sample, its
+        # children, AND any process the sample injected into that the monitor
+        # followed). Mirrored to pids_path so the guest wait-loop can adopt
+        # injected processes into the sample tree (2026-09-11).
+        self.pids = set()
+        self._pids_dirty = False
 
     def start(self):
         self._out = open(self.out_path, "w", encoding="utf-8", buffering=1)
+        if self.pids_path:
+            self._write_pids()  # truncate any stale state from a prior run
         self._accept_thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._accept_thread.start()
+
+    def _write_pids(self):
+        """Atomically mirror the attached-pid set (tmp + replace) so the
+        wait-loop never reads a partial file."""
+        try:
+            tmp = self.pids_path + ".tmp"
+            with open(tmp, "w", encoding="ascii") as f:
+                for pid in sorted(self.pids):
+                    f.write(f"{pid}\n")
+            os.replace(tmp, self.pids_path)
+            self._pids_dirty = False
+        except OSError:
+            pass
 
     def _accept_loop(self):
         while not self._stop.is_set():
@@ -154,6 +177,10 @@ class ApiTraceCollector:
         event.setdefault("ts", time.time())
         event.setdefault("source", "apitrace")
         with self._out_lock:
+            pid = event.get("pid")
+            if isinstance(pid, int) and pid not in self.pids:
+                self.pids.add(pid)
+                self._pids_dirty = True
             self._out.write(json.dumps(event, ensure_ascii=False) + "\n")
             self.event_count += 1
             if self.max_events and self.event_count >= self.max_events:
@@ -182,26 +209,35 @@ def main() -> None:
     parser.add_argument("--max-seconds", type=float, default=0.0, help="auto-stop after N seconds (0 = until stop-file/Ctrl-C)")
     parser.add_argument("--max-events", type=int, default=0, help="auto-stop after N events (0 = unlimited)")
     parser.add_argument("--stop-file", default=None, help="stop as soon as this file appears")
+    parser.add_argument("--pids-file", default=None,
+                        help="mirror attached pids here (one per line) for the guest wait-loop")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
-    col = ApiTraceCollector(args.pipe, args.out, max_events=args.max_events, quiet=args.quiet)
+    col = ApiTraceCollector(args.pipe, args.out, max_events=args.max_events, quiet=args.quiet,
+                            pids_path=args.pids_file)
     col.start()
     if not args.quiet:
         print(f"[collector] listening on {col.pipe_path} -> {args.out}", file=sys.stderr)
 
     deadline = time.time() + args.max_seconds if args.max_seconds else None
+    last_pids_flush = time.time()
     try:
         while not col._stop.is_set():
             if deadline and time.time() >= deadline:
                 break
             if args.stop_file and os.path.exists(args.stop_file):
                 break
+            if col.pids_path and col._pids_dirty and time.time() - last_pids_flush >= 1.0:
+                col._write_pids()
+                last_pids_flush = time.time()
             time.sleep(0.2)
     except KeyboardInterrupt:
         pass
     finally:
         col.stop()
+        if col.pids_path and col._pids_dirty:
+            col._write_pids()
 
     if not args.quiet:
         print(f"[collector] stopped: {col.connections} connection(s), {col.event_count} event(s) -> {args.out}",

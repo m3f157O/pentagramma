@@ -7,7 +7,7 @@ Status legend: **doing** / proposed / done / rejected.
 
 | # | Item | Value | Effort | Status |
 |---|---|---|---|---|
-| 2 | **Adaptive detonation window** — track the whole sample process tree (not just root); early-stop when tree is gone; idle-stop when apitrace is silent for `idle_grace` after `min_window`; ALWAYS final-dump on idle-stop (stalled process holds the payload); `StoppedEarly = exit/idle/timeout` in report; config `analysis.adaptive_window.*`. Also FIXES a detection gap: today collectors tear down when the root exits even if children live on | throughput ×1.5–2 on staller-heavy batches + child-follow fix | medium | **doing** |
+| 2 | **Adaptive detonation window** — sample-tree (descendants ∪ injected-host adoption) exit-stop with 30s floor; idle-stop on apitrace silence; final dump on idle-stop; `StoppedEarly` in report. Full doc: `docs/adaptive-detonation-window.md`. Live-validated: canary exit-stop clean/0, harness 90 + adoption (19/36 pids), staller idle-stop at 95s/300s with final dump | throughput ×1.5–2 on staller-heavy batches + child-follow fix | medium | **done** (2026-09-11) |
 
 ## Up next (agreed order)
 
@@ -15,7 +15,7 @@ Status legend: **doing** / proposed / done / rejected.
 |---|---|---|---|---|
 | 1 | **Fake-C2 / inetsim responder** — packed families (emotet) unpack then starve retrying seized 2022-era C2 IPs; answering those connections unlocks stage-2 payload behavior. Top detection-yield improvement. Guest DNS/hosts redirect + responder service | ★★★ | high | proposed |
 | 4 | **2 deferred emotet signatures** (from `docs/emotet-investigation.md`): (a) repeated direct-IP:443 C2 retries with zero DNS; (b) unpack-then-silent (stage-2 written, no follow-on). Forensics in `out/emotet_forensics.json` | ★★ | low | proposed |
-| 3 | **Multi-file zip staging** — today only the chosen zip entry is staged guest-side (`main.py` → `resolve_archive_entry`); stage ALL entries in the guest working dir. Helps real droppers w/ side-by-side DLLs AND Sysinternals goodware (EULA runner bat) | ★★ | medium | proposed |
+| 3 | **Multi-file zip staging** — stage ALL zip entries guest-side (sanitized relative paths, traversal-resolving) into C:\Sandbox before the main copy; `staging` manifest in report. Implemented 2026-09-11: `sample_types.build_staging_zip` + `Copy-SampleFolderToVM` (Copy-AgentToVM idiom), 15 unit tests green. Live validation pending (gate running) | ★★ | medium | **code-complete, validation pending** |
 | 5 | **Staller memory-dump + YARA rescan tuning** — mostly delivered by adaptive window's idle-stop final dump; tune dump timing/count for stall-then-unpack samples | ★★ | low (after #2) | proposed |
 | 6 | **Network apitrace hooks** (connect/send/recv/WSA*) — socket-level intel beyond Sysmon EID3; would also make idle-stop's activity signal cover network-only samples | ★★ | high (C++) | proposed |
 | 7 | **Office in golden image** — enables document-borne families (emotet/qakbot docs) | ★★ | medium | proposed |

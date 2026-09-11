@@ -167,6 +167,8 @@ class HyperVManager:
         adaptive_min_window_seconds: int = 0,
         adaptive_idle_grace_seconds: int = 45,
         activity_file_path: str = "",
+        adopted_pids_file: str = "",
+        min_runtime_seconds: int = 30,
     ) -> Dict[str, Any]:
         return self._run_ps(
             "Execute-Sample",
@@ -189,6 +191,8 @@ class HyperVManager:
             AdaptiveMinWindowSeconds=adaptive_min_window_seconds,
             AdaptiveIdleGraceSeconds=adaptive_idle_grace_seconds,
             ActivityFilePath=activity_file_path,
+            AdoptedPidsFile=adopted_pids_file,
+            MinRuntimeSeconds=min_runtime_seconds,
         )
 
     def apitrace_start(
@@ -197,6 +201,7 @@ class HyperVManager:
         output_file: str = "C:\\SandboxAgent\\apitrace.jsonl",
         stop_file: str = "C:\\SandboxAgent\\apitrace_stop.flag",
         max_seconds: int = 900,
+        pids_file: str = "",
     ) -> Dict[str, Any]:
         return self._run_ps(
             "Apitrace-Start",
@@ -204,6 +209,7 @@ class HyperVManager:
             OutputFile=output_file,
             StopFile=stop_file,
             MaxSeconds=max_seconds,
+            PidsFile=pids_file,
         )
 
     def apitrace_stop(

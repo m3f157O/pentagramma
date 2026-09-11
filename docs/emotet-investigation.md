@@ -17,6 +17,12 @@ Weak runs split into two patterns:
 | Pattern | Samples | Signature in telemetry |
 |---|---|---|
 | Alive but silent (TimedOut) | 8afc54bf(13), 1b87f2ef(15), 9165bc75(15), a4e1a5b0(23), a45317c3(38) | 44–830 ApiCalls (vs 3–3.5k in strong runs), apitrace stops 9–54 s in, process still alive at the 120 s timeout, ≤1 Sysmon event after last API call |
+
+> **Follow-up (2026-09-11):** this alive-but-silent class is exactly what the
+> adaptive detonation window now idle-stops — apitrace silent for 30s past the
+> 45s minimum window → stop with a final memory dump (`StoppedEarly: 'idle'`).
+> See `docs/adaptive-detonation-window.md`. The real unlock for stage-2
+> behavior remains the fake-C2 responder (roadmap #1).
 | Exits voluntarily <90 s | 396e6e07(21), 540dfbef(21), 09bdb0fb(25), f10052e1(29), 5d4ad664(34) | Exit=0, event window 26–90 s, no children, no drops |
 
 Mechanism, confirmed on the raw events (e.g. report `2ce1e373` / 8afc54bf):
