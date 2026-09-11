@@ -502,6 +502,12 @@ class SandboxExecutor:
             )
 
         timeout = timeout_seconds or self.config.analysis.get("default_timeout_seconds", 120)
+        # Adaptive detonation window: stop a traced sample early once its
+        # apitrace goes silent past the minimum window (staller class), and
+        # track the whole sample tree for exit. See analysis.adaptive_window
+        # in config.yaml.
+        aw_cfg = self.config.analysis.get("adaptive_window", {}) or {}
+        aw_enabled = bool(aw_cfg.get("enabled", False))
         vm_name = self.config.hyperv["analysis_vm"]
         agent_dir_host = self._agent_dir_host()
         guest_agent_dir = self.telemetry_cfg.get("guest_agent_dir", "C:\\SandboxAgent")
@@ -752,6 +758,13 @@ class SandboxExecutor:
                     monitor_loader_path=bt_cfg.get("guest_loader_path"),
                     monitor_pid_file=bt_cfg.get("guest_pid_file"),
                     monitor_pid_wait_seconds=bt_cfg.get("monitor_pid_wait_seconds"),
+                    adaptive_min_window_seconds=(
+                        aw_cfg.get("min_window_seconds", 45) if aw_enabled else 0
+                    ),
+                    adaptive_idle_grace_seconds=aw_cfg.get("idle_grace_seconds", 30),
+                    activity_file_path=(
+                        apitrace_guest_file if (aw_enabled and behavioral_tracing_enabled) else ""
+                    ),
                 )
             # Surface the pre-launch Defender/AMSI readiness result alongside the
             # execution record so the report shows whether AMSI was armed.

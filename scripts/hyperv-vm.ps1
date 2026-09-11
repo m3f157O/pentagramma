@@ -334,6 +334,21 @@ function Invoke-SampleExecution {
         [Parameter(Mandatory = $false)]
         [int]$MonitorPidWaitSeconds = 8,
 
+        # Adaptive detonation window (2026-09-11). 0 = disabled (today's fixed
+        # window). When > 0 AND behavioral tracing engaged AND ActivityFilePath
+        # points at the apitrace JSONL, a sample whose trace stays silent for
+        # AdaptiveIdleGraceSeconds past the minimum window is stopped early --
+        # the alive-but-stalled class (dead-C2 emotet) that today burns the
+        # full timeout producing nothing.
+        [Parameter(Mandatory = $false)]
+        [int]$AdaptiveMinWindowSeconds = 0,
+
+        [Parameter(Mandatory = $false)]
+        [int]$AdaptiveIdleGraceSeconds = 45,
+
+        [Parameter(Mandatory = $false)]
+        [string]$ActivityFilePath = "",
+
         [Parameter(Mandatory = $false)]
         [string]$CredentialUsername,
 
@@ -344,7 +359,7 @@ function Invoke-SampleExecution {
     Assert-VMExists -VMName $VMName | Out-Null
 
     $scriptBlock = {
-        param($path, $launcherPath, $argumentString, $workingDirectory, $timeoutSeconds, $dumpsDir, $dumpIntervalSeconds, $maxDumps, $maxWorkingSetBytes, $pollIntervalMs, $behavioralTracing, $monitorDllPath, $monitorLoaderPath, $monitorPidFile, $monitorPidWaitSeconds)
+        param($path, $launcherPath, $argumentString, $workingDirectory, $timeoutSeconds, $dumpsDir, $dumpIntervalSeconds, $maxDumps, $maxWorkingSetBytes, $pollIntervalMs, $behavioralTracing, $monitorDllPath, $monitorLoaderPath, $monitorPidFile, $monitorPidWaitSeconds, $adaptiveMinWindowSeconds, $adaptiveIdleGraceSeconds, $activityFilePath)
         # NOTE: both streams must be drained asynchronously *before*
         # WaitForExit() -- redirecting both stdout+stderr and only reading
         # them after WaitForExit() is the classic .NET Process deadlock: the
@@ -512,6 +527,49 @@ public class MiniDumpNative {
             }
         }
 
+        # Adaptive detonation window (2026-09-11): track the whole sample
+        # process TREE (root + descendants), not just $proc.
+        #  - exit-stop: tree fully gone -> done (root-exits-but-persistent-child
+        #    no longer tears collectors down early)
+        #  - idle-stop: tree alive but the apitrace JSONL ($activityFilePath,
+        #    line-buffered by the guest collector) hasn't grown for
+        #    $adaptiveIdleGraceSeconds past $adaptiveMinWindowSeconds -> the
+        #    alive-but-silent staller class; stop early WITH a final dump.
+        # Tree root is the traced child when present, else $proc (the loader
+        #    on the traced path is the sample's PARENT, so rooting at the
+        #    traced child keeps the loader itself out of the tree).
+        $treeRootPid = if ($tracedChildPid -ne $null) { $tracedChildPid } else { $proc.Id }
+        $adaptiveActive = ($adaptiveMinWindowSeconds -gt 0 -and $activityFilePath -and $tracedChildPid -ne $null)
+        function Get-SampleTreePids {
+            param([int]$RootPid)
+            $all = @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId -ErrorAction SilentlyContinue)
+            $byParent = @{}
+            foreach ($p in $all) {
+                $ppid = [int]$p.ParentProcessId
+                if (-not $byParent.ContainsKey($ppid)) { $byParent[$ppid] = @() }
+                $byParent[$ppid] += [int]$p.ProcessId
+            }
+            $found = @{}
+            $queue = [System.Collections.Generic.Queue[int]]::new()
+            $queue.Enqueue($RootPid)
+            while ($queue.Count -gt 0) {
+                $cur = $queue.Dequeue()
+                if ($found.ContainsKey($cur)) { continue }
+                $found[$cur] = $true
+                if ($byParent.ContainsKey($cur)) {
+                    foreach ($child in $byParent[$cur]) { if (-not $found.ContainsKey($child)) { $queue.Enqueue($child) } }
+                }
+            }
+            # only return pids that are actually still alive; $null = query
+            # failed (caller falls back to the legacy $proc.HasExited check).
+            # NB: unary comma -- a bare empty array return would enumerate to
+            # $null and be misread as a query failure.
+            if ($all.Count -eq 0) { return $null }
+            $aliveIds = @{}
+            foreach ($p in $all) { $aliveIds[[int]$p.ProcessId] = $true }
+            return ,@($found.Keys | Where-Object { $aliveIds.ContainsKey($_) })
+        }
+
         # Periodic-snapshot polling loop: replaces a single blocking
         # WaitForExit() so we can catch BOTH a hung/timed-out process AND a
         # naturally short-lived one (most real malware) -- whichever happens
@@ -524,11 +582,59 @@ public class MiniDumpNative {
         $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $lastDumpSeconds = 0.0
         $exited = $false
+        $stoppedEarly = $null  # 'idle' when the adaptive window cut a staller short
+        # Adaptive-window state: tree refresh throttled to 1 Hz (WMI query cost),
+        # activity probe to 2 s (file-size stat is cheap).
+        $treePids = @()
+        $treeKnown = $false
+        $treeCheckAt = 0.0
+        $lastActivitySize = -1
+        $lastActivityAt = 0.0
+        $nextActivityPollAt = $adaptiveMinWindowSeconds
+        $treePidsMax = 0
 
         while ($true) {
-            if ($proc.HasExited) { $exited = $true; break }
             $elapsedSeconds = $stopwatch.Elapsed.TotalSeconds
+            if ($elapsedSeconds -ge $treeCheckAt) {
+                $refreshed = Get-SampleTreePids $treeRootPid
+                if ($refreshed -ne $null) {
+                    $treePids = @($refreshed)
+                    $treeKnown = $true
+                    if ($treePids.Count -gt $treePidsMax) { $treePidsMax = $treePids.Count }
+                }
+                $treeCheckAt = $elapsedSeconds + 1.0
+            }
+            # exit-stop: the TREE is what decides once it's known. Traced path
+            # roots at the sample (loader is tooling -- its exit/lingering is
+            # irrelevant); untraced path roots at $proc, requiring $proc itself
+            # gone too (belt-and-braces against a mid-spawn snapshot). Any CIM
+            # failure degrades to today's $proc.HasExited behavior.
+            if (-not $treeKnown) {
+                if ($proc.HasExited) { $exited = $true; break }
+            } elseif ($tracedChildPid -ne $null) {
+                if ($treePids.Count -eq 0) { $exited = $true; break }
+            } elseif ($proc.HasExited -and $treePids.Count -eq 0) {
+                $exited = $true; break
+            }
             if ($elapsedSeconds -ge $timeoutSeconds) { break }
+
+            # idle-stop: only on the traced path (the apitrace file is the
+            # signal), only once the minimum observation window has elapsed.
+            if ($adaptiveActive -and $elapsedSeconds -ge $nextActivityPollAt) {
+                $nextActivityPollAt = $elapsedSeconds + 2.0
+                $size = -1
+                try { $size = (Get-Item -Path $activityFilePath -ErrorAction Stop).Length } catch { $size = -1 }
+                if ($size -lt 0) {
+                    # no signal (collector never created the file) -- never
+                    # idle-stop blind; the hard timeout governs this run.
+                } elseif ($size -ne $lastActivitySize) {
+                    $lastActivitySize = $size
+                    $lastActivityAt = $elapsedSeconds
+                } elseif (($elapsedSeconds - $lastActivityAt) -ge $adaptiveIdleGraceSeconds) {
+                    $stoppedEarly = 'idle'
+                    break
+                }
+            }
 
             if ($dumpsTaken -lt $maxDumps -and ($elapsedSeconds - $lastDumpSeconds) -ge $dumpIntervalSeconds) {
                 try {
@@ -554,10 +660,11 @@ public class MiniDumpNative {
         }
 
         if (-not $exited) {
-            # Timeout path: one final dump attempt, exempt from $maxDumps
-            # (still size-guarded) -- the single highest-value dump, since
-            # a process that's still alive at analysis end is very likely
-            # still holding unpacked payload in memory.
+            # Timeout OR idle-stop path: one final dump attempt, exempt from
+            # $maxDumps (still size-guarded) -- the single highest-value dump,
+            # since a process that's still alive at analysis end is very likely
+            # still holding unpacked payload in memory (doubly true for an
+            # idle-stopped staller).
             if (-not $proc.HasExited) {
                 try {
                     $finalAttempt = Invoke-ProcessDump -Process $dumpTargetProcess -Index $dumpAttempts.Count -DumpsDir $dumpsDir `
@@ -571,9 +678,17 @@ public class MiniDumpNative {
                 }
                 $dumpAttempts += $finalAttempt
             }
+            # kill the WHOLE tree (a persistent child must not survive the run),
+            # then wait on the launcher so ExitCode is safe to read below.
+            $finalTree = Get-SampleTreePids $treeRootPid
+            if ($finalTree -ne $null) { $treePids = @($finalTree) }
+            foreach ($treePid in $treePids) {
+                try {
+                    $tp = [System.Diagnostics.Process]::GetProcessById([int]$treePid)
+                    if (-not $tp.HasExited) { $tp.Kill() }
+                } catch {}
+            }
             try { $proc.Kill() } catch {}
-            # block until the OS process has actually terminated so ExitCode
-            # is safe to read below (Kill() itself is asynchronous)
             $proc.WaitForExit()
         }
 
@@ -581,7 +696,11 @@ public class MiniDumpNative {
         $stdoutText = if ($stdoutTask.IsCompleted -and -not $stdoutTask.IsFaulted) { $stdoutTask.Result } else { "" }
         $stderrText = if ($stderrTask.IsCompleted -and -not $stderrTask.IsFaulted) { $stderrTask.Result } else { "" }
         if (-not $exited) {
-            $stderrText = "Process did not exit within timeout`n" + $stderrText
+            if ($stoppedEarly -eq 'idle') {
+                $stderrText = "[adaptive] stopped early: no sample activity for ${adaptiveIdleGraceSeconds}s`n" + $stderrText
+            } else {
+                $stderrText = "Process did not exit within timeout`n" + $stderrText
+            }
         }
         # ProcessId stays "the sample's own pid" regardless of tracing -- the
         # traced child pid when tracing engaged, else $proc.Id (today's
@@ -600,6 +719,9 @@ public class MiniDumpNative {
             Stdout                  = Format-CapturedOutput $stdoutText $maxOutputChars
             Stderr                  = Format-CapturedOutput $stderrText $maxOutputChars
             TimedOut                = (-not $exited)
+            StoppedEarly            = if ($exited) { 'exit' } elseif ($stoppedEarly) { $stoppedEarly } else { 'timeout' }
+            AdaptiveWindowActive    = [bool]$adaptiveActive
+            TreePidsMax             = $treePidsMax
             ProcessDumps            = $dumpAttempts
             BehavioralTracingActive = [bool]($behavioralTracing -and $tracedChildPid -ne $null)
         }
@@ -629,7 +751,7 @@ public class MiniDumpNative {
     $invokeArgs = @{
         VMName       = $VMName
         ScriptBlock  = $scriptBlock
-        ArgumentList = @($SamplePathInVM, $resolvedLauncherPath, $resolvedLauncherArguments, $resolvedWorkingDirectory, $TimeoutSeconds, $DumpsDir, $DumpIntervalSeconds, $MaxDumps, $MaxWorkingSetBytes, $PollIntervalMs, $BehavioralTracing.IsPresent, $MonitorDllPath, $MonitorLoaderPath, $MonitorPidFile, $MonitorPidWaitSeconds)
+        ArgumentList = @($SamplePathInVM, $resolvedLauncherPath, $resolvedLauncherArguments, $resolvedWorkingDirectory, $TimeoutSeconds, $DumpsDir, $DumpIntervalSeconds, $MaxDumps, $MaxWorkingSetBytes, $PollIntervalMs, $BehavioralTracing.IsPresent, $MonitorDllPath, $MonitorLoaderPath, $MonitorPidFile, $MonitorPidWaitSeconds, $AdaptiveMinWindowSeconds, $AdaptiveIdleGraceSeconds, $ActivityFilePath)
     }
     if ($cred) { $invokeArgs['Credential'] = $cred }
     return Invoke-Command @invokeArgs

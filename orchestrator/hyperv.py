@@ -164,6 +164,9 @@ class HyperVManager:
         monitor_loader_path: Optional[str] = None,
         monitor_pid_file: Optional[str] = None,
         monitor_pid_wait_seconds: Optional[int] = None,
+        adaptive_min_window_seconds: int = 0,
+        adaptive_idle_grace_seconds: int = 45,
+        activity_file_path: str = "",
     ) -> Dict[str, Any]:
         return self._run_ps(
             "Execute-Sample",
@@ -183,6 +186,9 @@ class HyperVManager:
             MonitorLoaderPath=monitor_loader_path,
             MonitorPidFile=monitor_pid_file,
             MonitorPidWaitSeconds=monitor_pid_wait_seconds,
+            AdaptiveMinWindowSeconds=adaptive_min_window_seconds,
+            AdaptiveIdleGraceSeconds=adaptive_idle_grace_seconds,
+            ActivityFilePath=activity_file_path,
         )
 
     def apitrace_start(
