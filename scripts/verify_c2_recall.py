@@ -24,6 +24,10 @@ import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from scripts.label_from_manifests import _report_head  # noqa: E402
+
 GT_DIR = PROJECT_ROOT / "samples" / "incoming" / "malwarebazaar" / "_groundtruth"
 REPORTS = PROJECT_ROOT / "reports"
 MIN_CONFIDENCE = 50
@@ -122,12 +126,7 @@ def main() -> None:
     for rp in sorted(REPORTS.glob("*.json")):
         if rp.stem.endswith(".summary"):
             continue
-        try:
-            head = json.loads(rp.read_text(encoding="utf-8", errors="replace")[:200000])
-        except Exception:
-            continue
-        sha = (((head.get("sample") or {}).get("hashes") or {}).get("sha256") or "").lower()
-        ts = head.get("timestamp") or ""
+        sha, ts = _report_head(rp)
         if sha and (sha not in report_by_sha or ts > report_by_sha[sha][0]):
             report_by_sha[sha] = (ts, rp)
 

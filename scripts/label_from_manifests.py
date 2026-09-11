@@ -10,13 +10,48 @@ running, use scripts/corpus_split.py to assign train/test splits.
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
+from typing import Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 INCOMING = PROJECT_ROOT / "samples" / "incoming" / "malwarebazaar"
 REPORTS = PROJECT_ROOT / "reports"
 LABELS = PROJECT_ROOT / "tests" / "corpus" / "labels.json"
+
+# Real detonation reports are tens of MB; the sample block sits in the first
+# ~1.5 KB, so a head-regex is enough (json.loads on a truncated head always
+# fails -> silently skipped every big report; the original bug).
+SHA256_RE = re.compile(r'"sha256"\s*:\s*"([0-9a-fA-F]{64})"')
+TIMESTAMP_RE = re.compile(r'"timestamp"\s*:\s*"([^"]+)"')
+
+
+def _report_head(rp: Path) -> Tuple[str, str]:
+    """(sample sha256, report timestamp) read from a report's head;
+    ('', '') when unavailable. Shared by the corpus-metrics scripts."""
+    try:
+        with rp.open("r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(65536)
+    except Exception:
+        return "", ""
+    m = SHA256_RE.search(head)
+    ts_m = TIMESTAMP_RE.search(head)
+    if m:
+        return m.group(1).lower(), (ts_m.group(1) if ts_m else "")
+    # Fallback for small reports with an unusual layout (error stubs etc.).
+    try:
+        if rp.stat().st_size > 2_000_000:
+            return "", ""
+        doc = json.loads(rp.read_text(encoding="utf-8", errors="replace"))
+        sha = (((doc.get("sample") or {}).get("hashes") or {}).get("sha256") or "").lower()
+        return sha, (doc.get("timestamp") or "")
+    except Exception:
+        return "", ""
+
+
+def _report_sha256(rp: Path) -> str:
+    return _report_head(rp)[0]
 
 
 def main() -> None:
@@ -49,11 +84,7 @@ def main() -> None:
     for rp in sorted(REPORTS.glob("*.json")):
         if rp.stem.endswith(".summary"):
             continue
-        try:
-            head = json.loads(rp.read_text(encoding="utf-8", errors="replace")[:200000])
-        except Exception:
-            continue
-        sha = (((head.get("sample") or {}).get("hashes") or {}).get("sha256") or "").lower()
+        sha = _report_sha256(rp)
         if sha in manifest:
             report_sha[rp.stem] = sha
 

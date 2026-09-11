@@ -23,6 +23,8 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+from scripts.label_from_manifests import _report_head  # noqa: E402
+
 INCOMING = PROJECT_ROOT / "samples" / "incoming" / "malwarebazaar"
 REPORTS = PROJECT_ROOT / "reports"
 TTPS = PROJECT_ROOT / "orchestrator" / "data" / "family_ttps.json"
@@ -41,7 +43,9 @@ FAMILY_YARA_TOKENS = {  # family -> tokens to look for in rule names
 def report_techniques(report: dict) -> set:
     techs = set()
     for entry in (report.get("mitre_coverage") or {}).values():
-        for t in (entry.get("techniques") if isinstance(entry, dict) else []) or []:
+        # coverage entries store the technique list under "mitre" (older code
+        # looked for "techniques" and silently saw zero overlap everywhere)
+        for t in ((entry.get("mitre") or entry.get("techniques")) if isinstance(entry, dict) else []) or []:
             tid = t.get("technique_id") if isinstance(t, dict) else str(t)
             if tid:
                 techs.add(tid)
@@ -84,12 +88,7 @@ def main() -> None:
     for rp in sorted(REPORTS.glob("*.json")):
         if rp.stem.endswith(".summary"):
             continue
-        try:
-            head = json.loads(rp.read_text(encoding="utf-8", errors="replace")[:200000])
-        except Exception:
-            continue
-        sha = (((head.get("sample") or {}).get("hashes") or {}).get("sha256") or "").lower()
-        ts = head.get("timestamp") or ""
+        sha, ts = _report_head(rp)
         if sha in manifest and (sha not in report_by_sha or ts > report_by_sha[sha][0]):
             report_by_sha[sha] = (ts, rp)
 

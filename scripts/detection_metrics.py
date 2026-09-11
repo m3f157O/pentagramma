@@ -106,9 +106,15 @@ def _index_labels(labels: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 
 def score_corpus(reports_dir: Path, labels: List[Dict[str, Any]], sigma_engine) -> List[Dict[str, Any]]:
     """Replay every labeled report (detection-only fast path) and record
-    (label, predicted level, reasons)."""
+    (label, predicted level, reasons).
+
+    Supersession: a sample detonated more than once (e.g. a zero-event first
+    run redone later) contributes only its LATEST report (by report
+    timestamp); earlier ones are excluded from scoring and reported as
+    'superseded'. Reports matched by an explicit report-id label are always
+    kept -- that label deliberately names a specific run."""
     labels_index = _index_labels(labels)
-    scored: List[Dict[str, Any]] = []
+    candidates: List[Tuple[Dict[str, Any], str, Optional[str], Optional[str], Dict[str, Any], bool]] = []
     for path in sorted(reports_dir.glob("*.json")):
         report = load_report_file(path)
         if report is None:
@@ -117,6 +123,31 @@ def score_corpus(reports_dir: Path, labels: List[Dict[str, Any]], sigma_engine) 
         label = _match_label(labels_index, rid, sha, fn)
         if label is None:
             continue  # unlabeled -> not part of the measured corpus
+        candidates.append((report, rid, sha, fn, label, rid in labels_index["report"]))
+
+    # Latest report wins per sample sha256 (unless an explicit report-id label
+    # pins a specific run).
+    latest_by_sha: Dict[str, Tuple[Dict[str, Any], str, Optional[str], Optional[str], Dict[str, Any], bool]] = {}
+    superseded: List[Dict[str, Any]] = []
+    kept: List[Tuple[Dict[str, Any], str, Optional[str], Optional[str], Dict[str, Any], bool]] = []
+    for item in candidates:
+        report, rid, sha, fn, label, explicit = item
+        if explicit or not sha:
+            kept.append(item)
+            continue
+        current = latest_by_sha.get(sha)
+        if current is None or (report.get("timestamp") or "") >= (current[0].get("timestamp") or ""):
+            if current is not None:
+                superseded.append({"id": current[1], "filename": current[3], "sha256": sha,
+                                   "label": current[4]["label"], "superseded_by": rid})
+            latest_by_sha[sha] = item
+        else:
+            superseded.append({"id": rid, "filename": fn, "sha256": sha,
+                               "label": label["label"], "superseded_by": latest_by_sha[sha][1]})
+    kept.extend(latest_by_sha.values())
+
+    scored: List[Dict[str, Any]] = []
+    for report, rid, sha, fn, label, _explicit in kept:
         try:
             det = replay_detection_only(report, sigma_engine)
         except Exception as exc:
@@ -133,6 +164,7 @@ def score_corpus(reports_dir: Path, labels: List[Dict[str, Any]], sigma_engine) 
             "score": verdict.get("score"),
             "top_reasons": [r.get("reason") for r in verdict.get("top_reasons", [])],
         })
+    scored.extend(superseded)
     return scored
 
 
@@ -169,6 +201,7 @@ def _rates(tp: int, fp: int, fn: int, tn: int) -> Dict[str, Any]:
 def compute_metrics(scored: List[Dict[str, Any]]) -> Dict[str, Any]:
     valid = [s for s in scored if "error" not in s and s.get("predicted")]
     errors = [s for s in scored if "error" in s]
+    superseded = [s for s in scored if "superseded_by" in s]
 
     # Confusion matrix: true label x predicted band.
     confusion: Dict[str, Counter] = {"malicious": Counter(), "benign": Counter()}
@@ -212,6 +245,7 @@ def compute_metrics(scored: List[Dict[str, Any]]) -> Dict[str, Any]:
             "malicious": sum(1 for s in valid if s["label"] == "malicious"),
             "benign": sum(1 for s in valid if s["label"] == "benign"),
             "errors": len(errors),
+            "superseded": len(superseded),
         },
         "confusion": {k: dict(v) for k, v in confusion.items()},
         "thresholds": threshold_metrics,
@@ -239,7 +273,8 @@ def render_text(m: Dict[str, Any]) -> str:
         "=" * 68,
         "DETECTION METRICS (current pipeline, replayed over labeled corpus)",
         "=" * 68,
-        f"scored: {c['total_scored']} runs  ({c['malicious']} malicious, {c['benign']} benign)  errors: {c['errors']}",
+        f"scored: {c['total_scored']} runs  ({c['malicious']} malicious, {c['benign']} benign)  "
+        f"errors: {c['errors']}  superseded (older re-run reports, not scored): {c['superseded']}",
         "",
         "Confusion (true label -> predicted band):",
         f"  {'':10} {'malicious':>10} {'suspicious':>11} {'clean':>7}",

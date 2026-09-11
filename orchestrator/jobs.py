@@ -20,9 +20,11 @@ and the synchronous /api/analyze endpoint are NOT queued — they still
 reject-fast ("busy") via try_acquire(), same as before.
 """
 
+import logging
 import re
 import subprocess
 import threading
+import traceback
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -31,6 +33,8 @@ from typing import Any, Dict, List, Optional
 
 from orchestrator.config import SandboxConfig
 from orchestrator.executor import SandboxExecutor
+
+logger = logging.getLogger(__name__)
 
 MAX_RETAINED_JOBS = 200
 
@@ -361,7 +365,18 @@ def _run_analysis_job(
             report_status=report.get("status"),
         )
     except Exception as exc:
-        update_job(job_id, status="failed", finished_at=_now_iso(), error=str(exc))
+        # Keep `error` as the short message (API consumers expect it), but
+        # also retain the full traceback -- str(exc) alone is not enough to
+        # root-cause launch-path crashes (cf. emotet fc7a60ad NoneType bug).
+        tb = traceback.format_exc()
+        logger.error("analysis job %s failed:\n%s", job_id, tb)
+        update_job(
+            job_id,
+            status="failed",
+            finished_at=_now_iso(),
+            error=str(exc),
+            error_traceback=tb,
+        )
     finally:
         release()
 
