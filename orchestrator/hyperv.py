@@ -34,6 +34,7 @@ class HyperVManager:
         # Only commands that talk to the guest OS need credentials.
         commands_needing_credentials = {
             "Copy-Sample",
+            "Copy-SampleFolder",
             "Execute-Sample",
             "Copy-Agent",
             "Telemetry-Init",
@@ -145,6 +146,19 @@ class HyperVManager:
             DestinationFileName=destination_filename,
         )
         return result.get("DestinationPath", result)
+
+    def copy_sample_folder(
+        self,
+        staging_zip_path: str,
+        destination_folder: str = "C:\\Sandbox",
+    ) -> Dict[str, Any]:
+        """Extract a staging zip (all archive entries, sanitized relative
+        paths) into the guest working dir -- multi-file zip staging."""
+        return self._run_ps(
+            "Copy-SampleFolder",
+            StagingZipPath=staging_zip_path,
+            DestinationFolder=destination_folder,
+        )
 
     def execute_sample(
         self,

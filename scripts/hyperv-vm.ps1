@@ -868,6 +868,74 @@ function Copy-AgentToVM {
     }
 }
 
+function Copy-SampleFolderToVM {
+    <#
+    .SYNOPSIS
+        Multi-file zip staging: extract a HOST-side staging zip (all entries
+        of a submitted archive, with sanitized relative paths built by
+        orchestrator/sample_types.py::build_staging_zip) into the guest
+        working dir, so DLL side-loading and companion payloads resolve
+        next to the launched sample. Follows the Copy-AgentToVM idiom
+        (Copy-VMFile a zip, guest-side Expand-Archive) because Copy-VMFile
+        cannot copy directories recursively.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VMName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$StagingZipPath,
+
+        [Parameter(Mandatory = $false)]
+        [string]$DestinationFolder = "C:\Sandbox",
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialUsername,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialPassword
+    )
+
+    Assert-VMExists -VMName $VMName | Out-Null
+
+    if (-not (Test-Path $StagingZipPath)) {
+        throw "Staging zip not found: $StagingZipPath"
+    }
+
+    $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
+
+    $prep = {
+        param($folder)
+        if (-not (Test-Path $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
+        return $folder
+    }
+    $invokeArgsPrep = @{ VMName = $VMName; ScriptBlock = $prep; ArgumentList = $DestinationFolder }
+    if ($cred) { $invokeArgsPrep['Credential'] = $cred }
+    Invoke-Command @invokeArgsPrep | Out-Null
+
+    $guestZip = "$DestinationFolder\_staging.zip"
+    Copy-VMFile -Name $VMName -SourcePath $StagingZipPath -DestinationPath $guestZip -CreateFullPath -FileSource Host -Force
+
+    $unpack = {
+        param($folder, $zip)
+        Expand-Archive -Path $zip -DestinationPath $folder -Force
+        Remove-Item $zip -Force
+        $count = @(Get-ChildItem -Path $folder -Recurse -File).Count
+        return $count
+    }
+    $invokeArgsUnpack = @{ VMName = $VMName; ScriptBlock = $unpack; ArgumentList = @($DestinationFolder, $guestZip) }
+    if ($cred) { $invokeArgsUnpack['Credential'] = $cred }
+    $extracted = Invoke-Command @invokeArgsUnpack
+
+    return [PSCustomObject]@{
+        VMName            = $VMName
+        DestinationFolder = $DestinationFolder
+        Extracted         = [int]$extracted
+        Status            = "staged"
+    }
+}
+
 function Invoke-TelemetryInit {
     [CmdletBinding()]
     param(
@@ -2350,6 +2418,7 @@ if ($args.Count -gt 0) {
         "Stop-VM"                 { Stop-SandboxVM @remainingArgs | ConvertTo-Json }
         "Get-Status"              { Get-SandboxVMStatus @remainingArgs | ConvertTo-Json }
         "Copy-Sample"             { Copy-SampleToVM @remainingArgs | ConvertTo-Json }
+        "Copy-SampleFolder"       { Copy-SampleFolderToVM @remainingArgs | ConvertTo-Json }
         "Execute-Sample"          { Invoke-SampleExecution @remainingArgs | ConvertTo-Json -Depth 5 }
         "Copy-Agent"              { Copy-AgentToVM @remainingArgs | ConvertTo-Json }
         "Telemetry-Init"          { Invoke-TelemetryInit @remainingArgs | ConvertTo-Json }

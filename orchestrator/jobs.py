@@ -256,6 +256,8 @@ def submit_analysis_job(
     execution_error: Optional[str] = None,
     execution_error_detail: Optional[Any] = None,
     interactive: bool = False,
+    archive_path: Optional[str] = None,
+    archive_password: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run SandboxExecutor.run_analysis in a background thread -- immediately
     if the VM is idle, or queued (FIFO) behind whatever is already active.
@@ -297,6 +299,8 @@ def submit_analysis_job(
         execution_error=execution_error,
         execution_error_detail=execution_error_detail,
         interactive=interactive,
+        archive_path=archive_path,
+        archive_password=archive_password,
     )
 
     start_now = False
@@ -332,6 +336,8 @@ def _run_analysis_job(
     execution_error: Optional[str] = None,
     execution_error_detail: Optional[Any] = None,
     interactive: bool = False,
+    archive_path: Optional[str] = None,
+    archive_password: Optional[str] = None,
 ) -> None:
     update_job(job_id, status="running", started_at=_now_iso())
     executor = SandboxExecutor(config)
@@ -356,6 +362,8 @@ def _run_analysis_job(
             execution_error=execution_error,
             execution_error_detail=execution_error_detail,
             interactive=interactive,
+            archive_path=archive_path,
+            archive_password=archive_password,
         )
         update_job(
             job_id,

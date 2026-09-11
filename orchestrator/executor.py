@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from orchestrator import capa_analysis
+from orchestrator import sample_types
 from orchestrator.config import SandboxConfig
 from orchestrator.hyperv import HyperVManager
 from orchestrator.pid_lineage import build_pid_lineage
@@ -407,6 +408,8 @@ class SandboxExecutor:
         execution_error: Optional[str] = None,
         execution_error_detail: Optional[Any] = None,
         interactive: bool = False,
+        archive_path: Optional[str] = None,
+        archive_password: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run a sample inside the existing VM and return a structured report.
@@ -525,6 +528,11 @@ class SandboxExecutor:
         network_capture_enabled = net_cfg.get("enabled", False)
         capture_started = False
         network_capture_info: Dict[str, Any] = {"enabled": network_capture_enabled}
+        # Multi-file zip staging state (populated in step 6a when the
+        # submission was a zip); defined here so the report path can always
+        # read it even if the run fails before the staging step.
+        staging_info: Dict[str, Any] = {}
+        staging_zip_path: Optional[str] = None
         host_pcapng_path = logs_dir / f"{analysis_id}.pcapng"
 
         scr_cfg = self.config.screenshots
@@ -614,6 +622,45 @@ class SandboxExecutor:
             # 5. Initialize telemetry
             _step("telemetry_init")
             self.hv.telemetry_init(agent_dir=guest_agent_dir, sources=self._sources_str())
+
+            # 6a. Multi-file zip staging (roadmap #3): when the submission was
+            # a zip, stage ALL its entries (sanitized relative paths) into the
+            # guest working dir BEFORE the main copy -- so DLL side-loading and
+            # companion payloads resolve, and the main copy wins any collision
+            # with the synthetic sample.<ext> name. Fail-open: on any staging
+            # error the run proceeds single-file (today's behavior).
+            if archive_path:
+                _step("stage_archive")
+                try:
+                    archive_bytes = Path(archive_path).read_bytes()
+                    archive_cfg_st = sec_cfg.get("archive", {})
+                    staging_zip_path = str(logs_dir / f"_staging_{analysis_id}.zip")
+                    manifest = sample_types.build_staging_zip(
+                        archive_bytes,
+                        staging_zip_path,
+                        archive_password=archive_password,
+                        extra_passwords=archive_cfg_st.get("passwords_to_try", []),
+                        max_entry_size_bytes=archive_cfg_st.get("max_entry_size_bytes", 104857600),
+                        max_total_entries=archive_cfg_st.get("max_total_entries", 2000),
+                    )
+                    copy_res = self.hv.copy_sample_folder(
+                        staging_zip_path, destination_folder=guest_destination_folder
+                    )
+                    staging_info = {
+                        "archive_sha256": hashlib.sha256(archive_bytes).hexdigest(),
+                        "entries_staged": len(manifest["entries"]),
+                        "entries": manifest["entries"],
+                        "skipped": manifest["skipped"],
+                        "guest_extracted": copy_res.get("Extracted"),
+                    }
+                except Exception as exc:
+                    staging_info = {"error": f"archive staging failed, proceeding single-file: {exc}"}
+                finally:
+                    if staging_zip_path:
+                        try:
+                            Path(staging_zip_path).unlink(missing_ok=True)
+                        except OSError:
+                            pass
 
             # 6. Copy sample (skipped for URL submissions -- there's no
             # local file; the launcher targets the URL directly)
@@ -1113,6 +1160,8 @@ class SandboxExecutor:
                 "sample_type": sample_type,
                 "static_analysis": static_results,
             }
+            if staging_info:
+                sample_metadata["staging"] = staging_info
         else:
             static_results = {}
             sample_metadata = {

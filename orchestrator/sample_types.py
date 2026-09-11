@@ -424,3 +424,153 @@ def _read_aes_zip_entry(
     raise ArchiveResolutionError(
         "wrong_password", f"Failed to decrypt {entry_name!r} (AES) with any known password"
     ) from last_error
+
+
+# ---------------------------------------------------------------------------
+# Multi-file zip staging (2026-09-11, roadmap #3)
+# ---------------------------------------------------------------------------
+
+_STAGED_NAME_SAFE = re.compile(r"[^A-Za-z0-9._\-]")
+_STAGED_DRIVE = re.compile(r"^[A-Za-z]:")
+
+
+def sanitize_staged_name(name: str, used: set) -> str:
+    """Map an attacker-controlled zip entry name to a safe relative guest
+    path. Traversal is RESOLVED (pop on '..', clamped at the root -- matches
+    what a real extractor would do without ever allowing escape), drive
+    letters and rooted paths dropped, unsafe chars replaced (same policy as
+    derive_fetch_filename). Duplicate results get -2/-3 suffixes. Total
+    length capped at 120 chars.
+    """
+    parts: List[str] = []
+    for seg in re.split(r"[/\\]", name):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if parts:
+                parts.pop()
+            continue
+        if _STAGED_DRIVE.match(seg):  # pure drive-letter segment: drop
+            continue
+        seg = _STAGED_DRIVE.sub("", seg)
+        seg = _STAGED_NAME_SAFE.sub("_", seg).strip(".") or "_"
+        parts.append(seg)
+    if not parts:
+        parts = ["file"]
+    staged = "/".join(parts)
+    if len(staged) > 120:
+        stem, dot, ext = staged.partition(".")
+        staged = (stem[: 120 - len(ext) - 1] + dot + ext) if dot else staged[:120]
+    candidate = staged
+    n = 2
+    while candidate in used:
+        candidate = f"{staged}-{n}"
+        n += 1
+    used.add(candidate)
+    return candidate
+
+
+def build_staging_zip(
+    data: bytes,
+    out_path: str,
+    archive_password: Optional[str] = None,
+    extra_passwords: Optional[List[str]] = None,
+    max_entry_size_bytes: int = 104857600,
+    max_total_entries: int = 2000,
+) -> Dict[str, Any]:
+    """Extract ALL file entries of a submitted archive into a NEW staging zip
+    containing only sanitized relative paths, for guest-side Expand-Archive
+    (Copy-SampleFolderToVM). Same safety contract as resolve_archive_entry:
+    entries are read() into memory only, never extracted to host disk, and
+    the staging zip is built from sanitized names so no attacker-controlled
+    path is ever written anywhere.
+
+    Returns a manifest: {entries: [{name, staged_as, size}],
+                         skipped: [{name, reason}]}.
+    Raises ArchiveResolutionError for invalid/empty/oversized archives.
+    """
+    extra_passwords = extra_passwords or []
+    candidates: List[Optional[str]] = [None]
+    if archive_password:
+        candidates.append(archive_password)
+    for extra in extra_passwords:
+        if extra not in candidates:
+            candidates.append(extra)
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile as exc:
+        raise ArchiveResolutionError("invalid_archive", f"Not a valid ZIP archive: {exc}") from exc
+
+    manifest: Dict[str, Any] = {"entries": [], "skipped": []}
+    with zf:
+        infos = [info for info in zf.infolist() if not info.is_dir()]
+        if len(infos) > max_total_entries:
+            raise ArchiveResolutionError(
+                "too_many_entries", f"Archive contains {len(infos)} entries, exceeding the {max_total_entries} cap"
+            )
+        if not infos:
+            raise ArchiveResolutionError("empty_archive", "Archive contains no files")
+
+        # Per-entry content reader: stdlib first; on AES (NotImplementedError)
+        # re-open the whole archive via pyzipper once and serve from there.
+        azf = None
+
+        def read_entry(entry_name: str) -> bytes:
+            nonlocal azf
+            last_error: Optional[Exception] = None
+            for candidate in candidates:
+                pwd = candidate.encode("utf-8") if candidate else None
+                try:
+                    if azf is not None:
+                        return azf.read(entry_name, pwd=pwd)
+                    return zf.read(entry_name, pwd=pwd)
+                except NotImplementedError:
+                    # AES archive: switch to pyzipper for good and restart
+                    # the candidate loop against it (stdlib is ZipCrypto-only).
+                    try:
+                        import pyzipper
+                    except ImportError as exc:
+                        raise ArchiveResolutionError(
+                            "unsupported_encryption",
+                            "Archive uses AES encryption and pyzipper is not installed",
+                        ) from exc
+                    azf = pyzipper.AESZipFile(io.BytesIO(data))
+                    return read_entry(entry_name)
+                except RuntimeError as exc:
+                    last_error = exc
+                    continue
+            raise ArchiveResolutionError(
+                "wrong_password", f"Failed to decrypt {entry_name!r} with any known password"
+            ) from last_error
+
+        used: set = set()
+        staged_items: List[Tuple[str, bytes]] = []
+        try:
+            for info in infos:
+                if info.file_size > max_entry_size_bytes:
+                    manifest["skipped"].append({"name": info.filename, "reason": "entry_too_large"})
+                    continue
+                try:
+                    content = read_entry(info.filename)
+                except ArchiveResolutionError as exc:
+                    manifest["skipped"].append({"name": info.filename, "reason": exc.args[0] if exc.args else "read_error"})
+                    continue
+                staged_as = sanitize_staged_name(info.filename, used)
+                staged_items.append((staged_as, content))
+                manifest["entries"].append(
+                    {"name": info.filename, "staged_as": staged_as, "size": info.file_size}
+                )
+        finally:
+            if azf is not None:
+                azf.close()
+
+    if not staged_items:
+        raise ArchiveResolutionError(
+            "nothing_staged", f"No archive entries could be staged ({len(manifest['skipped'])} skipped)"
+        )
+
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as out:
+        for staged_as, content in staged_items:
+            out.writestr(staged_as, content)
+    return manifest

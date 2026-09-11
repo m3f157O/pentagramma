@@ -674,12 +674,16 @@ def _prepare_submission(
         )
 
     final_filename, final_content, final_type = filename, content, resolved_type
+    archive_path: Optional[str] = None
 
     if resolved_type == "zip":
         archive_cfg = sec_cfg.get("archive", {})
-        # Store the archive itself for provenance even though the
-        # extracted entry becomes the real sample below.
-        samples.store_sample(filename=filename, data=content, source=source, sample_type="zip")
+        # Store the archive itself for provenance; the executor re-opens it
+        # to stage ALL entries guest-side (multi-file zip staging). Keeping
+        # the stored path in the job kwargs avoids holding bytes across the
+        # async job queue.
+        archive_meta = samples.store_sample(filename=filename, data=content, source=source, sample_type="zip")
+        archive_path = archive_meta["stored_path"]
         try:
             entry_name, entry_content = sample_types.resolve_archive_entry(
                 content,
@@ -726,6 +730,8 @@ def _prepare_submission(
         "url_mode": None,
         "execution_error": plan.execution_error,
         "execution_error_detail": plan.execution_error_detail,
+        "archive_path": archive_path,
+        "archive_password": archive_password if archive_path else None,
     }
 
 
