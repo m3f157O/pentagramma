@@ -281,3 +281,73 @@ real historical data.
 - Fixed (guest-side): `agent/windows/apply_noise_reduction.py` (apply/verify; disables updater/telemetry/CEIP/indexer tasks+services + telemetry policies; Defender and wuauserv kept) + `provision_golden_image.ps1` step + `POST /api/vm/provision-noise-reduction`.
 - Remaining: the WmiEvent Sysmon gap (#10) stays open.
 - **Live-validated 2026-09-11** on the recaptured SANDBOX_READY (noise reduction applied via `provision-noise-reduction`): benign canary clean/0 (was suspicious/12), events 39,246 → 14,200, alerts 29,437 → 6,730; InjectionHarness still malicious/90, amsi_detection malicious/48 (was 52: −4 = the suppressed own-apitrace-pipe group, real detections intact), defender_tampering malicious/47 (in the ~42–46 band). New canary contract: benign **clean/0**, amsi **48**, tamper **~42–47**, harness **90**.
+
+## Splunk attack-data → Sigma validation (2026-09-05)
+
+Offline validation of the production Sigma engine against the Splunk
+`attack_data` dataset repo (`scripts/validate_sigma_attack_data.py`): each
+dataset's Sysmon JSONL is parsed through the agent's own `SysmonParser._parse_xml`
+and fed through `sigma_engine.evaluate`, exactly as live telemetry would be.
+Full run: **276/339 datasets (81%) produced ≥1 Sigma alert, 448 distinct rules
+fired**. Full output: `out/_attack_data_validation_full.txt`; the 63 zero-match
+datasets: `out/_attack_data_zero_match.txt`.
+
+Methodology caveats before reading the gap list:
+- This replays **Sysmon only**. Live runs additionally have apitrace, AMSI,
+  behavioral heuristics, static/dump YARA, and PCAP — several zero-match classes
+  below are covered by those layers in the sandbox (e.g. T1486 mass-encryption
+  is caught by the `mass_file_modification` heuristic, T1055 by the
+  InjectionHarness telemetry) — the gap is in the *Sigma* layer only.
+- Several datasets are not Windows-Sysmon telemetry at all (network appliance
+  logs, ESXi, empty files) — unwinnable by any Sysmon rule.
+
+### Zero-match datasets, grouped (63 total)
+
+**A. Not Sysmon telemetry / empty datasets — out of scope (≈14):**
+T1195.001 npm ×3 (0/0/12 ev), T1562.004 ART (0 ev), T1190 proxyshell (0 ev) /
+sap / screenconnect / crushftp (appliance exploits), T1195.002 3CX (network),
+T1570 + T1569.002 remcom (network), T1021.003 speechruntime (network),
+T1542.003 bootkits (network-winlogon), T1136.001 esxadmins (ESXi),
+T1110.001 rdp_brute (Security-log 4625s, not Sysmon).
+
+**B. High-value rule gaps — candidates for new Sigma rules (top priority):**
+- **T1033 AD_discovery (2987 ev)** — `net group "domain admins" /domain`,
+  nltest, dsquery-style discovery commandlines; no discovery-recon rules loaded.
+- **T1047 lateral_movement (3487 ev)** — WMI `process call create` remote
+  execution; surprising gap, review why loaded WMI rules missed it.
+- **T1053.002 lateral_movement (3534 ev)** — remote `schtasks /s`.
+- **T1548.002 LocalAccountTokenFilterPolicy (5335 ev)** — registry write under
+  `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System`; classic
+  UAC-bypass/persistence rule candidate.
+- **T1561.002 mbr_raw_access (1769 ev)** — raw access to `\\.\PhysicalDrive0`.
+- **T1485 ransomware_extensions/notes ×3 (217/217/9 ev)** and **T1486 dcrypt
+  (343 ev)** — ransom-note file drops + extension renames; sandbox-side
+  heuristic covers live runs, but a Sigma file-event rule would close the
+  offline layer too.
+- **T1566.001 macro (7118 ev)** — Office spawning script interpreters; upstream
+  Sigma has rules for this — review why none fired (possible parser field
+  mapping issue, worth checking before writing anything new).
+
+**C. Medium-value rule gaps:**
+T1059.003 cmd_spawns_cscript (853 ev) / powershell_spawn_cmd (496 ev);
+T1218 diskshadow / eviltwin / msix_ai_stubs / bitlockertogo; T1218.001 hh.exe;
+T1218.005 mshta_tasks; T1620 reflective CLR load; T1574.002 msi_module_load ×2 /
+sccm_adsource_dll / wineloader; T1036 msdtc_process_param /
+suspicious_process_path / write_to_recycle_bin (848 ev); T1204.002
+batch_file_in_system32 / single_letter_exe; T1059 suspiciously_named_executables;
+T1556 disable_lsa_protection / disable_credential_guard; T1222.001 subinacl;
+T1505.003 sharepoint_webshell; T1505.004; T1547.012 print_reg; T1068
+bluehammer / redsun; T1135 net_share; T1114.001 email files outside dir;
+T1595 sysmon_scanning_events (64 ev); T1055 sliver (6 ev — review; harness
+covers this class live); T1027 trickbot_drop; T1059.001 ART /
+powershell_remotesigned.
+
+### Recommended follow-ups (ranked)
+1. Verify the T1566.001 macro and T1047 WMI-lateral misses aren't *parser/
+   field-mapping* bugs before writing rules — those two have abundant upstream
+   rule coverage that should have fired.
+2. New Sigma rules (sigma_rules_custom/ or upstream sync): AD-discovery
+   commandlines, remote schtasks, LocalAccountTokenFilterPolicy, PhysicalDrive
+   raw access, ransom-note filenames.
+3. Re-run the validator after adding rules; target ≥90% dataset coverage
+   excluding group A.

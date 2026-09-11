@@ -1,11 +1,9 @@
 # PENTAGRAMMA — Work Queue (2026-09-05)
 
-## 1. Commit + push all uncommitted work — BLOCKED on corpus gate
-Gate (pid 27780) replaying ~152 reports with boundary-tier gates must PASS first.
-Uncommitted: reporting.py, heuristics.py, yara/suspicious_strings.yar (+.bak),
-tests/corpus/labels.json, detection_metrics.py, test_corpus_metrics.py,
-test_tooling_attribution.py, ART tooling, goodware samples, README, this file,
-noise-reduction files. (blog/ stays uncommitted per user pref.)
+## 1. ~~Commit + push all uncommitted work~~ — DONE 2026-09-05
+Gate PASSED (test split 27 runs: recall 1.000, fpr 0.000, precision(mal) 1.000).
+Pushed: `46194dc` (noise reduction + FP fixes + corpora tooling) and `735ca57`
+(adaptive window). Docs commit for gap-tracker attack-data section pending.
 
 ## 2. ART detonation batch + coverage audit — after gate
 `scripts/detonate_corpus.py --worklist out\_art_missing.txt` (55 samples, ~2.5–3h),
@@ -14,18 +12,22 @@ then `scripts/verify_atomic_coverage.py --gaps` → gap tracker.
 ## 3. Real goodware detonation — after ART
 4 `samples/goodware_real/*.exe` (7za, curl, plink, rg) staged + labeled, not yet detonated.
 
-## 4. Splunk attack-data results → detection-gap tracker
-Full 342-dataset run in progress (pid 17904); pilot was 10/10 datasets, 53 rules.
+## 4. ~~Splunk attack-data results → detection-gap tracker~~ — DONE 2026-09-05
+Full 342-dataset run: 276/339 (81%) covered, 448 rules. 63 zero-match datasets
+triaged + grouped in docs/detection-gap-tracker.md. Follow-ups (new section):
+verify T1566.001/T1047 aren't parser bugs, then new Sigma rules (AD discovery,
+remote schtasks, LocalAccountTokenFilterPolicy, PhysicalDrive, ransom notes),
+target ≥90% excl. out-of-scope.
 
-## 5. Adaptive detonation window — IMPLEMENTED, live validation pending (VM busy until gate done)
+## 5. Adaptive detonation window — IMPLEMENTED + COMMITTED (`735ca57`), live validation pending
 Track whole sample tree (WMI BFS @1Hz); exit-stop on empty tree; idle-stop when
 apitrace JSONL silent past min_window (45s) + idle_grace (30s); final dump on
 idle-stop; kill whole tree; StoppedEarly (exit|idle|timeout) + AdaptiveWindowActive
-+ TreePidsMax in execution_info; config `analysis.adaptive_window` (enabled).
-Done: hyperv-vm.ps1 Execute-Sample, hyperv.py params, executor.py plumbing,
-config.yaml. PS1 parse OK, 121 unit tests pass.
-Pending: canary benign_control (clean/0, exit-stop), InjectionHarness (90),
-staller (idle-stop early WITH final dump), then gate rerun.
++ TreePidsMax in execution_info; config `analysis.adaptive_window` (enabled,
+gitignored — defaults preserve legacy behavior).
+Pending (VM now free — gate + attack-data runs done): canary benign_control
+(clean/0, exit-stop), InjectionHarness (90), staller (idle-stop early WITH final
+dump), then gate rerun.
 
 ## Deferred bugs
 - multi-file zip staging (side-loading malware + Sysinternals EULA blockers)
