@@ -1044,6 +1044,31 @@ def _detect_counterpart_misses(
     by_pid = _index_apitrace_by_pid(apitrace)
     children = _child_pids_by_actor(apitrace)
 
+    # PID-reuse guard (observed live 2026-09-12, benign canary scored 15):
+    # the monitor attached to a short-lived child (certutil, pid N); the OS
+    # later REUSED pid N for an unrelated, untracked process. The new
+    # incarnation's Sysmon events were judged against the old process's
+    # apitrace slot -> 82 phantom "hook blind" misses. A Sysmon EID 1 naming
+    # a pid the monitor already attached to marks exactly such a new
+    # incarnation: its events are not covered by the old process's hooks and
+    # must not count as misses.
+    pid_reused_from: Dict[int, datetime] = {}
+    for event in events:
+        if event.get("source") != "sysmon" or event.get("event_id") != 1:
+            continue
+        ts1 = _parse_ts(event)
+        pid1 = _safe_int((event.get("data") or {}).get("ProcessId"))
+        if pid1 is None or ts1 is None:
+            continue
+        slot1 = by_pid.get(pid1)
+        if not slot1:
+            continue
+        attached1 = slot1["attached"]
+        if attached1 is not None and ts1 > attached1:
+            prev = pid_reused_from.get(pid1)
+            if prev is None or ts1 < prev:
+                pid_reused_from[pid1] = ts1
+
     alerts: List[Dict[str, Any]] = []
     misses: Dict[Tuple[int, str], Dict[str, Any]] = {}
     for event in events:
@@ -1076,6 +1101,9 @@ def _detect_counterpart_misses(
             continue  # wow64 re-injection gap -- hooks not yet placed
         if eid in (8, 10) and _safe_int(data.get("TargetProcessId")) in children.get(pid, ()):
             continue  # monitor's child-following injection / kernel32 spawn writes
+        reused_from = pid_reused_from.get(pid)
+        if reused_from is not None and ts >= reused_from:
+            continue  # pid reused by a new, untracked incarnation
         covered = any(
             api in apis and abs((ev_ts - ts).total_seconds()) <= BLINDSPOT_WINDOW_SECONDS
             for ev_ts, api, _ in slot["events"]

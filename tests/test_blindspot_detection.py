@@ -289,6 +289,29 @@ def test_own_child_remote_thread_suppressed():
     assert "hook NtCreateThreadEx blind" in blind[0]["data"]["Type"]
 
 
+def test_pid_reuse_suppressed():
+    # Monitor attaches to a short-lived process (pid 4000). The OS then
+    # REUSES pid 4000 for an unrelated, untracked process (Sysmon EID 1 at
+    # t=30). The new incarnation's image loads (EID 7) must NOT count as
+    # hook-blind misses against the old process's apitrace slot -- observed
+    # live 2026-09-12: certutil exited, its pid was reused by powershell,
+    # and the benign canary scored 15 on 82 phantom misses.
+    events = [
+        _meta("__monitor_attached__", 4000, 0),
+        _api("NtCreateFile", 4000, 1, "C:\\Windows\\Temp\\a.bin", category="file"),
+        _sysmon(1, 4000, 30, Image="C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"),
+        _sysmon(7, 4000, 31, ImageLoaded="C:\\Windows\\System32\\a.dll"),
+        _sysmon(7, 4000, 32, ImageLoaded="C:\\Windows\\System32\\b.dll"),
+        _sysmon(7, 4000, 33, ImageLoaded="C:\\Windows\\System32\\c.dll"),
+    ]
+    assert not _blindspot_or_silence(detect_behavioral_signatures(events))
+    # Sanity: without the EID-1 reuse marker the same loads DO alert.
+    events = events[:2] + events[3:]
+    blind = [a for a in detect_behavioral_signatures(events) if a["event_type"] == "ApitraceBlindSpot"]
+    assert len(blind) == 1, blind
+    assert "hook LdrLoadDll blind" in blind[0]["data"]["Type"], blind[0]
+
+
 def test_missing_coverage_map_noop():
     # Offline-replay robustness: no machine map -> detectors no-op, not crash.
     from orchestrator import behavioral_signatures as bs
@@ -319,6 +342,7 @@ def main() -> None:
     test_kernel_bam_registry_write_suppressed()
     test_startup_image_load_grace_suppressed()
     test_own_child_injection_suppressed()
+    test_pid_reuse_suppressed()
     test_missing_coverage_map_noop()
     print("ALL BLIND-SPOT DETECTION TESTS PASSED")
 
