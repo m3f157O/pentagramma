@@ -543,6 +543,8 @@ class ReportGenerator:
                 "sample_type": sample_metadata.get("sample_type"),
                 "url": sample_metadata.get("url"),
                 "url_mode": sample_metadata.get("url_mode"),
+                # Multi-file zip staging manifest (None for non-archive submissions)
+                "staging": sample_metadata.get("staging"),
             },
             "environment": {
                 "vm_name": vm_name,
