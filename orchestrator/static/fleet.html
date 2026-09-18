@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Fleet &middot; PENTAGRAMMA</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="css/style.css?v=21" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">PENTAGRAMMA</div>
+    <nav>
+      <a href="index.html">Dashboard</a>
+      <a href="live.html">Live Trace</a>
+      <a href="traces.html">Traces</a>
+      <a href="reports.html">Reports</a>
+      <a href="rules.html">Rules</a>
+      <a href="harness.html">Injection Harness</a>
+      <a href="architecture.html">Architecture</a>
+      <a href="console.html">Console</a>
+      <a href="fleet.html" class="active">Fleet</a>
+    </nav>
+    <div style="margin-left:auto">
+      <span id="mode-badge" class="badge neutral" style="display:none" title="Execution backend (sandbox.mode)"></span>
+      <span class="small muted">orchestrator</span>
+      <span id="health-badge" class="badge neutral">checking&hellip;</span>
+    </div>
+  </header>
+
+  <main>
+    <h1>Analysis environment fleet</h1>
+    <p class="muted small">Every machine that can detonate samples: the local host (local mode) and all Hyper-V VMs on this host. VMs registered in <span class="mono">hyperv.vms</span> (config.yaml) get credential status + guest instrumentation health; unregistered VMs are inventory-only. Read-only.</p>
+
+    <div class="grid cols-2" id="fleet-cards" style="margin-top:12px">
+      <div class="muted small">Loading&hellip;</div>
+    </div>
+  </main>
+
+  <script src="js/api.js?v=12"></script>
+  <script src="js/poll.js?v=5"></script>
+  <script src="js/fleet.js?v=1"></script>
+</body>
+</html>

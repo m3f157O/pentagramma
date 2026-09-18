@@ -12,6 +12,8 @@ backups/
 
 # --- Local config (contains guest VM credentials) ---
 config/config.yaml
+config/config.yaml.bak
+config/vms.yaml
 
 # --- Temp one-off analysis scripts ---
 scripts/_*.py

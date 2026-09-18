@@ -2507,18 +2507,18 @@ function Invoke-SampleExecutionInteractive {
     return Invoke-AnalysisCommand $invokeArgs
 }
 
-function Get-LocalSandboxStatus {
+$script:InstrumentationProbe = {
     <#
-    .SYNOPSIS
-        Local-mode environment status: instrumentation health of THIS
-        machine instead of VM state. Consumed by the orchestrator's
-        /api/vm/status endpoint (dashboard "Analysis Environment" card).
-        Every check is defensive -- a broken probe reports $false, never
-        throws.
-    #>
-    [CmdletBinding()]
-    param()
+    Shared instrumentation-health probe. Runs ON the analysis machine,
+    whatever it is: in-process for local mode (Get-LocalSandboxStatus), via
+    PSDirect Invoke-Command inside the guest for hyperv mode
+    (Get-GuestHealth). Must stay self-contained (no calls to functions in
+    this script -- it is remoted). Every check is defensive: a broken probe
+    reports $false, never throws.
 
+    defender_rtp is guest-relevant: on a detonation VM realtime protection
+    must be OFF (samples must run); the dashboard renders it inverted.
+    #>
     $sysmon = $false
     try {
         $svc = Get-Service -Name 'Sysmon64', 'Sysmon' -ErrorAction SilentlyContinue |
@@ -2547,23 +2547,138 @@ function Get-LocalSandboxStatus {
         $secureBoot = [bool](Confirm-SecureBootUEFI)
     } catch { $secureBoot = $false }
 
+    $defenderRtp = $false
+    try {
+        $defenderRtp = [bool](Get-MpComputerStatus).RealTimeProtectionEnabled
+    } catch {}
+
+    $osCaption = ''
+    $osBuild = ''
+    try {
+        $probeOs = Get-CimInstance Win32_OperatingSystem
+        $osCaption = $probeOs.Caption
+        $osBuild = $probeOs.BuildNumber
+    } catch {}
+
+    return [PSCustomObject]@{
+        Checks = [PSCustomObject]@{
+            sysmon          = $sysmon
+            agent_dir       = $agentPresent
+            monitor_dlls    = $dlls
+            guardian_driver = $guardian
+            secure_boot     = $secureBoot
+            defender_rtp    = $defenderRtp
+        }
+        System = [PSCustomObject]@{
+            Hostname = $env:COMPUTERNAME
+            OS       = $osCaption
+            Build    = $osBuild
+        }
+    }
+}
+
+function Get-GuestHealth {
+    <#
+    .SYNOPSIS
+        Instrumentation health of the Hyper-V analysis GUEST (hyperv-mode
+        counterpart of Get-LocalSandboxStatus): runs the shared
+        $script:InstrumentationProbe inside the VM via PSDirect. Read-only
+        and defensive -- VM off or any PSDirect failure yields Checks=$null
+        plus a ChecksError string; never throws. Consumed by
+        HyperVManager.get_status (30s TTL cache) for the dashboard's
+        "Analysis Environment" card.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$VMName,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialUsername,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialPassword
+    )
+
+    $result = [PSCustomObject]@{ Checks = $null; GuestSystem = $null; ChecksError = $null }
+    try {
+        $vm = Assert-VMExists -VMName $VMName
+        if ($vm.State -ne 'Running') {
+            $result.ChecksError = "VM is $($vm.State)"
+            return $result
+        }
+        $invokeArgs = @{ VMName = $VMName; ScriptBlock = $script:InstrumentationProbe }
+        $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
+        if ($cred) { $invokeArgs['Credential'] = $cred }
+        $probe = Invoke-AnalysisCommand $invokeArgs
+        if ($probe) {
+            $result.Checks = $probe.Checks
+            $result.GuestSystem = $probe.System
+        }
+    } catch {
+        $result.ChecksError = $_.Exception.Message
+    }
+    return $result
+}
+
+function Get-FleetVMs {
+    <#
+    .SYNOPSIS
+        Host-side inventory of ALL Hyper-V VMs (fleet page). Read-only,
+        no guest contact: name, power state, uptime, first IPv4. The
+        orchestrator merges this with the hyperv.vms credential registry.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $vms = @(Get-VM | ForEach-Object {
+        $ip = (Get-VMNetworkAdapter -VMName $_.Name).IPAddresses |
+              Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' } |
+              Select-Object -First 1
+        [PSCustomObject]@{
+            Name      = $_.Name
+            State     = $_.State.ToString()
+            Uptime    = $_.Uptime.ToString()
+            IPAddress = $ip
+        }
+    })
+    # Caller collects with @(...) and serializes via -InputObject (piping an
+    # array into ConvertTo-Json wraps it in {value,Count} -- PS5.1 quirk).
+    return $vms
+}
+
+function Get-LocalSandboxStatus {
+    <#
+    .SYNOPSIS
+        Local-mode environment status: instrumentation health of THIS
+        machine instead of VM state. Consumed by the orchestrator's
+        /api/vm/status endpoint (dashboard "Analysis Environment" card).
+        Runs the shared $script:InstrumentationProbe in-process; local mode
+        surfaces 5 of the 6 checks (defender_rtp is guest-relevant).
+    #>
+    [CmdletBinding()]
+    param()
+
+    $probe = & $script:InstrumentationProbe
+
     $uptime = ''
     try {
         $uptime = ((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).ToString('d\.hh\:mm\:ss')
     } catch {}
 
     return [PSCustomObject]@{
-        VMName    = 'local'
-        State     = 'Running'
-        Uptime    = $uptime
-        IPAddress = '127.0.0.1'
-        Mode      = 'local'
-        Checks    = [PSCustomObject]@{
-            sysmon          = $sysmon
-            agent_dir       = $agentPresent
-            monitor_dlls    = $dlls
-            guardian_driver = $guardian
-            secure_boot     = $secureBoot
+        VMName      = 'local'
+        State       = 'Running'
+        Uptime      = $uptime
+        IPAddress   = '127.0.0.1'
+        Mode        = 'local'
+        LocalSystem = $probe.System
+        Checks      = [PSCustomObject]@{
+            sysmon          = $probe.Checks.sysmon
+            agent_dir       = $probe.Checks.agent_dir
+            monitor_dlls    = $probe.Checks.monitor_dlls
+            guardian_driver = $probe.Checks.guardian_driver
+            secure_boot     = $probe.Checks.secure_boot
         }
     }
 }
@@ -2591,6 +2706,8 @@ if ($args.Count -gt 0) {
         "Stop-VM"                 { Stop-SandboxVM @remainingArgs | ConvertTo-Json }
         "Get-Status"              { Get-SandboxVMStatus @remainingArgs | ConvertTo-Json }
         "Get-LocalStatus"         { Get-LocalSandboxStatus | ConvertTo-Json -Depth 5 }
+        "Get-FleetVMs"            { $r = @(Get-FleetVMs); ConvertTo-Json -InputObject $r -Depth 5 }
+        "Get-GuestHealth"         { Get-GuestHealth @remainingArgs | ConvertTo-Json -Depth 5 }
         "Copy-Sample"             { Copy-SampleToVM @remainingArgs | ConvertTo-Json }
         "Copy-SampleFolder"       { Copy-SampleFolderToVM @remainingArgs | ConvertTo-Json }
         "Execute-Sample"          { Invoke-SampleExecution @remainingArgs | ConvertTo-Json -Depth 5 }

@@ -32,9 +32,9 @@ $guestDir = "C:\SandboxAgent\guardian"
 # Guest creds come from config\config.yaml (gitignored -- never hardcode them
 # here; this repo is pushed to a public remote).
 $_cfgText = Get-Content (Join-Path $root "config\config.yaml") -Raw
-$_vmUser = ([regex]::Match($_cfgText, 'vm_username:\s*"([^"]+)"')).Groups[1].Value
-$_vmPass = ([regex]::Match($_cfgText, 'vm_password:\s*"([^"]+)"')).Groups[1].Value
-if (-not $_vmUser -or -not $_vmPass) { throw "vm_username/vm_password not found in config\config.yaml" }
+$_vmUser = ([regex]::Match($_cfgText, 'username:\s*"([^"]+)"')).Groups[1].Value
+$_vmPass = ([regex]::Match($_cfgText, 'password:\s*"([^"]+)"')).Groups[1].Value
+if (-not $_vmUser -or -not $_vmPass) { throw "credentials not found in config\config.yaml (hyperv.vms list)" }
 $sec = ConvertTo-SecureString $_vmPass -AsPlainText -Force
 $cred = New-Object System.Management.Automation.PSCredential($_vmUser, $sec)
 

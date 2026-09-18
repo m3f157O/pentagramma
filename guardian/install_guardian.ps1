@@ -29,8 +29,8 @@ $driverDest = "C:\Windows\System32\drivers\SandboxGuard.sys"
 $_cfgText = Get-Content (Join-Path $root "config\config.yaml") -Raw
 if (-not $VMName)       { $VMName = ([regex]::Match($_cfgText, 'analysis_vm:\s*"([^"]+)"')).Groups[1].Value }
 if (-not $SnapshotName) { $SnapshotName = ([regex]::Match($_cfgText, 'snapshot_name:\s*"([^"]+)"')).Groups[1].Value }
-$_vmUser = ([regex]::Match($_cfgText, 'vm_username:\s*"([^"]+)"')).Groups[1].Value
-$_vmPass = ([regex]::Match($_cfgText, 'vm_password:\s*"([^"]+)"')).Groups[1].Value
+$_vmUser = ([regex]::Match($_cfgText, 'username:\s*"([^"]+)"')).Groups[1].Value
+$_vmPass = ([regex]::Match($_cfgText, 'password:\s*"([^"]+)"')).Groups[1].Value
 if (-not $VMName -or -not $_vmUser -or -not $_vmPass) { throw "config.yaml missing analysis_vm / vm credentials" }
 $sec = ConvertTo-SecureString $_vmPass -AsPlainText -Force
 $cred = New-Object System.Management.Automation.PSCredential($_vmUser, $sec)

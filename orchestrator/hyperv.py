@@ -7,16 +7,39 @@ never creates or deletes VMs.
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from orchestrator.config import SandboxConfig
 
+# Guest-health probe cache (module-level: main.py builds a fresh HyperVManager
+# per request, so instance state would never survive between /api/vm/status
+# polls). Keyed by VM name so the fleet endpoint can probe several VMs. The
+# dashboard polls every few seconds while a PSDirect probe costs ~1-3s, so
+# probes are refreshed at most every TTL seconds per VM.
+_GUEST_HEALTH_CACHE: Dict[str, Dict[str, Any]] = {}
+GUEST_HEALTH_TTL_SECONDS = 30.0
+
+# Local instrumentation probe cache: the probe is a ~1.7s powershell.exe spawn
+# (script load + CIM + Get-MpComputerStatus) and the fleet page polls every
+# 10s -- cache it the same way. Staleness is display-only; every detonation
+# re-verifies its own environment at run time.
+_LOCAL_STATUS_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
+LOCAL_STATUS_TTL_SECONDS = 30.0
+
+# Host VM inventory cache: Get-FleetVMs is a ~2s powershell.exe spawn (script
+# load + Hyper-V module + Get-VM) and the fleet page polls every 10s.
+_FLEET_VMS_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
+FLEET_VMS_TTL_SECONDS = 15.0
+
 
 class HyperVManager:
-    def __init__(self, config: SandboxConfig):
+    def __init__(self, config: SandboxConfig, vm_name: Optional[str] = None):
         self.config = config
-        self.vm_name = config.hyperv["analysis_vm"]
+        # Fleet provisioning/status can target any registered VM; the
+        # analysis default remains config.hyperv.analysis_vm.
+        self.vm_name = vm_name or config.hyperv["analysis_vm"]
         self.snapshot_name = config.hyperv.get("snapshot_name", "SANDBOX-CLEAN")
         self.script_path = Path(config.paths["scripts_dir"]) / "hyperv-vm.ps1"
         if not self.script_path.exists():
@@ -52,13 +75,13 @@ class HyperVManager:
             "Copy-SandboxArchive",
             "Clear-SandboxArchive",
             "Invoke-GuestPython",
+            "Get-GuestHealth",
             "Restart-Guest",
             "Console-InputServer-Start",
             "Console-InputServer-Stop",
             "Execute-Sample-Interactive",
         }
-        vm_username = self.config.hyperv.get("vm_username")
-        vm_password = self.config.hyperv.get("vm_password")
+        vm_username, vm_password = self.config.vm_creds(params.get("VMName", self.vm_name))
         if command in commands_needing_credentials and vm_username and vm_password:
             if "CredentialUsername" not in params:
                 params["CredentialUsername"] = vm_username
@@ -130,8 +153,78 @@ class HyperVManager:
         (new-then-swap; the VM must be running/ready when called)."""
         return self._run_ps("Recapture-Snapshot", SnapshotName=self.snapshot_name)
 
-    def get_status(self) -> Dict[str, Any]:
-        return self._run_ps("Get-Status")
+    def list_vms(self) -> List[Dict[str, Any]]:
+        """Host-side inventory of ALL Hyper-V VMs (fleet page): name, state,
+        uptime, first IPv4. Read-only, no guest contact. 15s TTL cache --
+        power-state staleness is acceptable for an inventory display and the
+        probe costs ~2s per spawn."""
+        now = time.monotonic()
+        if _FLEET_VMS_CACHE["data"] is None or (now - _FLEET_VMS_CACHE["ts"]) > FLEET_VMS_TTL_SECONDS:
+            result = self._run_ps("Get-FleetVMs")
+            if isinstance(result, list):
+                vms = result
+            else:
+                vms = [result] if result else []
+            _FLEET_VMS_CACHE["data"] = vms
+            _FLEET_VMS_CACHE["ts"] = now
+        return _FLEET_VMS_CACHE["data"]
+
+    def get_status(self, vm_name: Optional[str] = None) -> Dict[str, Any]:
+        """VM power state plus (when Running) guest instrumentation health,
+        merged from the Get-GuestHealth probe with a module-level TTL cache.
+        Probe failures never fail the status call: Checks stays None and
+        ChecksError carries the reason (dashboard renders 'unavailable').
+        vm_name defaults to the configured analysis VM; the fleet endpoint
+        passes explicit names."""
+        vm_name = vm_name or self.vm_name
+        status = self._run_ps("Get-Status", VMName=vm_name)
+        if not isinstance(status, dict):
+            return status
+        if status.get("State") != "Running":
+            # Keep the last-known health in the cache (marked by state) so
+            # the fleet detail view can show "last recorded" data; force a
+            # fresh probe on the next Running transition (stale guest state
+            # after a reboot is worthless).
+            slot = _GUEST_HEALTH_CACHE.get(vm_name)
+            if slot is not None:
+                slot["state"] = status.get("State")
+            status["Checks"] = None
+            return status
+        slot = _GUEST_HEALTH_CACHE.get(vm_name)
+        now = time.monotonic()
+        if (
+            slot is None
+            or slot.get("state") != "Running"
+            or (now - slot["ts"]) > GUEST_HEALTH_TTL_SECONDS
+        ):
+            try:
+                data = self._run_ps("Get-GuestHealth", VMName=vm_name)
+            except Exception as exc:  # PSDirect down, guest wedged, ...
+                data = {"Checks": None, "GuestSystem": None, "ChecksError": str(exc)}
+            slot = {"ts": now, "wall": time.time(), "state": "Running", "data": data}
+            _GUEST_HEALTH_CACHE[vm_name] = slot
+        health = slot["data"] or {}
+        status["Checks"] = health.get("Checks")
+        if health.get("GuestSystem"):
+            status["GuestSystem"] = health["GuestSystem"]
+        if health.get("ChecksError"):
+            status["ChecksError"] = health["ChecksError"]
+        return status
+
+    @staticmethod
+    def last_guest_health(vm_name: str) -> Optional[Dict[str, Any]]:
+        """Last recorded guest-health snapshot for the fleet detail view:
+        {recorded_at (epoch), age_seconds, state_at_probe, data} or None when
+        the VM was never probed this process lifetime."""
+        slot = _GUEST_HEALTH_CACHE.get(vm_name)
+        if slot is None:
+            return None
+        return {
+            "recorded_at": slot.get("wall"),
+            "age_seconds": round(time.monotonic() - slot["ts"], 1),
+            "state_at_probe": slot.get("state"),
+            "data": slot.get("data"),
+        }
 
     def copy_sample(
         self,
@@ -529,10 +622,30 @@ class LocalTransport(HyperVManager):
         return {"VMName": "local", "State": "Running", "IPAddress": "127.0.0.1"}
 
     def get_status(self) -> Dict[str, Any]:
-        status = self._run_ps("Get-LocalStatus")
-        if isinstance(status, dict):
-            status["Mode"] = "local"
-        return status
+        # 30s TTL cache (module-level: a fresh LocalTransport is built per
+        # request): the probe is a ~1.7s powershell.exe spawn and the fleet
+        # page polls every 10s. Display staleness only -- detonation runs
+        # re-verify their own environment.
+        now = time.monotonic()
+        if _LOCAL_STATUS_CACHE["data"] is None or (now - _LOCAL_STATUS_CACHE["ts"]) > LOCAL_STATUS_TTL_SECONDS:
+            status = self._run_ps("Get-LocalStatus")
+            if isinstance(status, dict):
+                status["Mode"] = "local"
+            _LOCAL_STATUS_CACHE["data"] = status
+            _LOCAL_STATUS_CACHE["ts"] = now
+            _LOCAL_STATUS_CACHE["wall"] = time.time()
+        return _LOCAL_STATUS_CACHE["data"]
+
+    @staticmethod
+    def last_local_status() -> Optional[Dict[str, Any]]:
+        """Last recorded local-status snapshot for the fleet detail view."""
+        if _LOCAL_STATUS_CACHE["data"] is None:
+            return None
+        return {
+            "recorded_at": _LOCAL_STATUS_CACHE.get("wall"),
+            "age_seconds": round(time.monotonic() - _LOCAL_STATUS_CACHE["ts"], 1),
+            "data": _LOCAL_STATUS_CACHE["data"],
+        }
 
     def copy_agent(self, agent_source_dir: str, destination_dir: str = "C:\\SandboxAgent") -> Dict[str, Any]:
         # The installer deploys C:\SandboxAgent once; a per-run re-sync would

@@ -14,9 +14,15 @@ from starlette.types import Scope
 
 from orchestrator import behavioral_signatures, cape_engine as cape_engine_mod, console, harness_validation, heuristics, jobs, local_trace, pcap_view, report_view, sample_types, static_analysis
 from orchestrator.backends import make_backend
-from orchestrator.config import get_config
+from orchestrator.config import (
+    delete_vm_credentials,
+    get_config,
+    registered_vm_credentials,
+    set_mode as _write_mode,
+    set_vm_credentials,
+)
 from orchestrator.executor import SandboxExecutor
-from orchestrator.hyperv import HyperVManager  # VM-gated provisioning endpoints (see _require_hyperv)
+from orchestrator.hyperv import HyperVManager, LocalTransport  # VM-gated provisioning endpoints (see _require_hyperv)
 from orchestrator.reporting import ReportGenerator
 from orchestrator.samples import SampleManager
 from orchestrator.sigma_engine import SigmaEngine
@@ -72,6 +78,37 @@ def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/config/mode")
+def get_mode() -> Dict[str, Any]:
+    """Active execution backend (hyperv|local). The dashboard renders this
+    prominently: it decides WHERE submitted malware executes."""
+    cfg = _cfg()
+    return {"mode": cfg.mode, "is_local": cfg.is_local_mode}
+
+
+@app.post("/api/config/mode")
+def set_mode(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Switch the execution backend from the GUI. Writes config.yaml via
+    orchestrator.config.set_mode (comment-preserving surgery + .bak backup).
+    get_config() re-reads the file per call, so new analyses pick the new
+    mode up immediately; an orchestrator restart is still recommended so
+    cached subsystems reinitialize."""
+    mode = str((payload or {}).get("mode", ""))
+    try:
+        previous = _write_mode(mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"config write failed: {exc}") from exc
+    return {
+        "ok": True,
+        "previous": previous,
+        "mode": mode.strip().lower(),
+        "restart_recommended": True,
+        "note": "new analyses use the new mode immediately; restart the orchestrator to reinitialize cached subsystems",
+    }
+
+
 @app.get("/api/vm/status")
 def vm_status() -> Dict[str, Any]:
     """Analysis-environment status: VM presence in hyperv mode, local
@@ -84,6 +121,222 @@ def vm_status() -> Dict[str, Any]:
         return status
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/fleet")
+def fleet() -> Dict[str, Any]:
+    """Inventory of analysis environments (Fleet page): the local machine
+    plus EVERY Hyper-V VM on the host. VMs registered in hyperv.vms are
+    'managed' (credentials configured -> guest health probes possible);
+    unregistered VMs appear inventory-only. Read-only; per-entry errors are
+    captured, never fatal."""
+    cfg = _cfg()
+    entries = []
+
+    # The local machine is always a fleet member (detonation environment in
+    # local mode; plain host otherwise). Probe is TTL-cached (LocalTransport).
+    local_entry: Dict[str, Any] = {"name": "local", "type": "local", "active": cfg.is_local_mode}
+    try:
+        local_status = LocalTransport(cfg).get_status()
+        local_entry["state"] = local_status.get("State", "Running")
+        local_entry["checks"] = local_status.get("Checks")
+        local_entry["system"] = local_status.get("LocalSystem")
+    except Exception as exc:
+        local_entry["state"] = "unknown"
+        local_entry["error"] = str(exc)
+    entries.append(local_entry)
+
+    # Credential registry: name -> {"configured", "username"} (presence only,
+    # never values). Sources: hyperv.vms in config.yaml + GUI-managed vms.yaml.
+    registry_full = registered_vm_credentials(cfg.hyperv)
+    registry = {name: info["configured"] for name, info in registry_full.items()}
+
+    try:
+        hyperv = HyperVManager(cfg)
+        host_vms = hyperv.list_vms()
+    except Exception as exc:
+        hyperv = None
+        host_vms = []
+        host_error = str(exc)
+    else:
+        host_error = None
+
+    seen = set()
+    for vm in host_vms:
+        name = vm.get("Name")
+        if not name:
+            continue
+        seen.add(name)
+        managed = name in registry
+        has_creds = registry.get(name, False)
+        entry: Dict[str, Any] = {
+            "name": name,
+            "type": "hyperv",
+            "active": (not cfg.is_local_mode) and name == cfg.hyperv.get("analysis_vm"),
+            "managed": managed,
+            "credentials_configured": has_creds,
+            "state": vm.get("State"),
+            "ip": vm.get("IPAddress") or None,
+            "uptime": vm.get("Uptime"),
+        }
+        if managed and has_creds and vm.get("State") == "Running":
+            try:
+                st = hyperv.get_status(name)  # TTL-cached guest health
+                entry["checks"] = st.get("Checks")
+                if st.get("GuestSystem"):
+                    entry["system"] = st["GuestSystem"]
+                if st.get("ChecksError"):
+                    entry["checks_error"] = st["ChecksError"]
+            except Exception as exc:
+                entry["checks_error"] = str(exc)
+        entries.append(entry)
+
+    # Registered but absent from the host (deleted/renamed VM): still show it.
+    for name in sorted(set(registry) - seen):
+        entries.append({
+            "name": name,
+            "type": "hyperv",
+            "active": False,
+            "managed": True,
+            "credentials_configured": registry[name],
+            "state": "missing",
+            "error": host_error or "registered in hyperv.vms but not found on this host",
+        })
+
+    return {"mode": cfg.mode, "entries": entries}
+
+
+@app.get("/api/fleet/{name}")
+def fleet_detail(name: str) -> Dict[str, Any]:
+    """Per-environment detail for the Fleet page 'Manage' view: credential
+    presence (username only -- NEVER the password) and the last recorded
+    instrumentation-health snapshot (TTL cache, may be stale; age included)."""
+    cfg = _cfg()
+    if name == "local":
+        return {
+            "name": "local",
+            "type": "local",
+            "credentials": {
+                "required": False,
+                "note": "runs as the orchestrator's own identity (elevated)",
+            },
+            "last_health": LocalTransport.last_local_status(),
+        }
+
+    registry = registered_vm_credentials(cfg.hyperv)
+    info = registry.get(name)
+    credentials = {
+        "required": True,
+        "configured": bool(info and info["configured"]),
+        "username": info.get("username") if info else None,
+    }
+    return {
+        "name": name,
+        "type": "hyperv",
+        "managed": info is not None,
+        "credentials": credentials,
+        "last_health": HyperVManager.last_guest_health(name),
+    }
+
+
+@app.post("/api/fleet/{name}/credentials")
+def fleet_set_credentials(name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Register guest credentials for a VM from the Fleet page. Written to
+    config/vms.yaml (machine-managed registry), picked up on the next
+    get_config()/probe call -- no restart needed."""
+    username = str((payload or {}).get("username", "")).strip()
+    password = str((payload or {}).get("password", ""))
+    try:
+        set_vm_credentials(name, username, password)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"credential write failed: {exc}") from exc
+    return {"ok": True, "name": name, "configured": True, "username": username}
+
+
+@app.delete("/api/fleet/{name}/credentials")
+def fleet_delete_credentials(name: str) -> Dict[str, Any]:
+    """Unregister a VM's credentials (config/vms.yaml only -- entries in
+    config.yaml's hyperv.vms are hand-managed and untouched)."""
+    removed = delete_vm_credentials(name)
+    return {"ok": True, "name": name, "removed": removed}
+
+
+# In-place fleet instrumentation (Fleet page Manage modal). Unlike the
+# /api/vm/provision-* golden-image flows (restore -> boot -> recapture
+# snapshot), these steps modify the target AS-IS: no snapshot operations.
+FLEET_PROVISION_STEPS = ("agent", "sysmon", "defender-off", "dressing", "noise-reduction")
+
+
+@app.post("/api/fleet/{name}/provision/{step}")
+def fleet_provision(name: str, step: str) -> Dict[str, Any]:
+    """Run one instrumentation step against a fleet member (VM via PSDirect,
+    or the local host via the LocalMode seam). Steps: agent (deploy
+    C:\\SandboxAgent), sysmon (install/reconfigure from bundled Sysmon64),
+    defender-off, dressing, noise-reduction. Guardian is deliberately NOT
+    here (testsigning/reboot dance stays manual)."""
+    cfg = _cfg()
+    if step not in FLEET_PROVISION_STEPS:
+        raise HTTPException(status_code=404, detail=f"unknown step {step!r} (have {list(FLEET_PROVISION_STEPS)})")
+
+    agent_src = cfg.paths.get("agent_dir")
+    guest_agent_dir = cfg.telemetry.get("guest_agent_dir", "C:\\SandboxAgent")
+    sources = ",".join(cfg.telemetry.get("sources", ["sysmon"]))
+
+    if name == "local":
+        backend = LocalTransport(cfg)
+    else:
+        username, password = cfg.vm_creds(name)
+        if not (username and password):
+            raise HTTPException(status_code=409, detail=f"no credentials configured for {name!r} (use the credential form first)")
+        backend = HyperVManager(cfg, vm_name=name)
+        try:
+            st = backend.get_status(name)
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"cannot reach VM {name!r}: {exc}") from exc
+        if st.get("State") != "Running":
+            raise HTTPException(status_code=409, detail=f"VM {name!r} is {st.get('State', 'unknown')} -- start it first")
+        if st.get("ChecksError"):
+            # PSDirect probe failed: wrong creds, non-Windows guest, ...
+            raise HTTPException(status_code=409, detail=f"guest preflight failed: {st['ChecksError']}")
+
+    try:
+        if step == "agent":
+            result = backend.copy_agent(agent_source_dir=agent_src, destination_dir=guest_agent_dir)
+        elif step == "sysmon":
+            result = backend.telemetry_init(agent_dir=guest_agent_dir, sources=sources)
+        elif step == "defender-off":
+            # Mirror the golden-image flow (provision-defender-off): the
+            # DisableRealtimeMonitoring GROUP POLICY is honored at service
+            # start, so without a reboot the AMSI provider stays armed and
+            # our own readiness probe lands in the windefend log (found
+            # 2026-09-18: API-provisioned pentagramma scored the benign
+            # canary suspicious/25 via self-detected MpTest!amsi). VMs get
+            # the reboot; the local host does NOT (operator owns that).
+            result = {
+                "disable": backend.invoke_guest_python("defender_manager.py", "disable", agent_dir=guest_agent_dir),
+            }
+            if name != "local":
+                result["reboot"] = backend.restart_guest()
+            else:
+                result["note"] = "no reboot on the local host -- reboot manually for the policy to fully apply (AMSI provider)"
+            result["verify"] = backend.invoke_guest_python("defender_manager.py", "verify", agent_dir=guest_agent_dir)
+        elif step == "dressing":
+            result = {
+                "apply": backend.invoke_guest_python("apply_dressing.py", "apply", agent_dir=guest_agent_dir),
+                "verify": backend.invoke_guest_python("apply_dressing.py", "verify", agent_dir=guest_agent_dir),
+            }
+        else:  # noise-reduction
+            result = {
+                "apply": backend.invoke_guest_python("apply_noise_reduction.py", "apply", agent_dir=guest_agent_dir),
+                "verify": backend.invoke_guest_python("apply_noise_reduction.py", "verify", agent_dir=guest_agent_dir),
+            }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return {"status": "failed", "step": step, "target": name, "error": str(exc)}
+    return {"status": "ok", "step": step, "target": name, "result": result}
 
 
 # A full Sigma rule-parse is ~5s, so cache the engine across requests rather

@@ -36,9 +36,14 @@ autostart task. Sysmon needs no explicit step — telemetry init installs and
 reconfigures it per run.
 
 Then start the orchestrator elevated as usual (`start.ps1`). The dashboard's
-**Analysis Environment** card shows `mode: local` plus an instrumentation
-checklist (Sysmon service, agent dir, monitor DLLs, Guardian driver, Secure
-Boot state).
+**Analysis Environment** card shows `mode: local`, the local system's
+hostname/OS/build, and an instrumentation checklist (Sysmon service, agent
+dir, monitor DLLs, Guardian driver, Secure Boot state).
+
+**Running samples:** there is no separate "local sandbox" launcher in the GUI
+— when `sandbox.mode: local` is active, the regular **Analyze** form (or
+`POST /api/analyze`) detonates on the local machine. Mode is a process-level
+config switch, not a per-run choice.
 
 ## Guardian without the driver — what you lose
 
@@ -70,8 +75,14 @@ explicitly-visible degraded mode — not a silent failure.
 4. Reports from local mode are **not comparable** to VM-mode corpus baselines
    (`environment.mode` differs; noise profile differs).
 
-## Switching back
+## Switching modes
 
-`config\config.yaml`: set `sandbox.mode: hyperv` (or restore
-`config.yaml.bak`), restart the orchestrator. The installer is idempotent;
-re-running it refreshes the agent.
+From the dashboard's **Analysis Environment** card: the *Switch to
+local/Hyper-V* button writes `sandbox.mode` via `POST /api/config/mode`
+(with a one-time `config.yaml.bak` backup). New analyses pick the change up
+immediately (`get_config()` re-reads the file per call); an orchestrator
+restart is still recommended so cached subsystems reinitialize. The topbar
+badge always shows the active mode (`hyperv — isolated VM` green /
+`LOCAL — malware runs on THIS machine` red). Manual path:
+`config\config.yaml` → `sandbox.mode: hyperv` (or restore `config.yaml.bak`)
++ restart. The installer is idempotent; re-running it refreshes the agent.

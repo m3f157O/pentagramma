@@ -22,8 +22,9 @@ function setHealthBadge(ok) {
   el.className = "badge " + (ok ? "ok" : "bad");
 }
 
-// Execution-backend indicator (sandbox.mode). Local mode = standalone
-// package: the orchestrator's own machine is the detonation environment.
+// Execution-backend indicator (sandbox.mode). ALWAYS visible: the operator
+// must know at a glance where submitted malware detonates. local mode =
+// standalone package: the orchestrator's own machine is the environment.
 function setModeBadge(mode) {
   const el = document.getElementById("mode-badge");
   if (!el) return;
@@ -32,8 +33,38 @@ function setModeBadge(mode) {
     return;
   }
   el.style.display = "";
-  el.textContent = "mode: " + mode;
-  el.className = "badge " + (mode === "local" ? "bad" : "neutral");
+  if (mode === "local") {
+    el.textContent = "LOCAL — malware runs on THIS machine";
+    el.className = "badge bad";
+  } else {
+    el.textContent = "hyperv — isolated VM";
+    el.className = "badge ok";
+  }
+}
+
+// GUI mode switch: writes sandbox.mode via /api/config/mode (takes effect
+// for new analyses immediately; restart recommended). Safety-critical, so
+// the local-mode direction gets an explicit warning confirm.
+async function onSwitchMode(ev) {
+  const target = ev.currentTarget.getAttribute("data-target");
+  const st = document.getElementById("mode-switch-status");
+  const warning = target === "local"
+    ? "Switch to LOCAL mode?\n\nSubmitted samples will detonate on THIS machine, with the orchestrator's privileges and NO snapshot rollback. Only continue if this is a disposable analysis environment."
+    : "Switch back to Hyper-V mode (isolated VM, snapshot rollback)?";
+  if (!confirm(warning)) return;
+  try {
+    const r = await Api.setMode(target);
+    if (st) st.textContent = `mode → ${r.mode} (applies to new analyses; restart recommended)`;
+    refreshVm();
+  } catch (e) {
+    if (st) st.textContent = "mode switch failed: " + e.message;
+  }
+}
+
+function renderModeSwitch(mode) {
+  const target = mode === "local" ? "hyperv" : "local";
+  const label = target === "local" ? "Switch to local (THIS machine)…" : "Switch to Hyper-V (isolated VM)…";
+  return `<div style="margin-top:10px"><button id="btn-switch-mode" class="secondary" data-target="${target}">${label}</button> <span id="mode-switch-status" class="small muted"></span></div>`;
 }
 
 // Snapshot buttons are Hyper-V-only; local mode has no rollback to manage.
@@ -44,16 +75,31 @@ function setVmControlsVisible(visible) {
   }
 }
 
-const LOCAL_CHECK_LABELS = {
+const CHECK_LABELS = {
   sysmon: "Sysmon service",
   agent_dir: "agent dir (C:\\SandboxAgent)",
   monitor_dlls: "monitor DLLs + loader",
   guardian_driver: "Guardian driver (optional)",
 };
 
-function renderLocalChecks(checks) {
+function renderSystemInfo(sys, label) {
+  if (!sys) return "";
+  const bits = [];
+  if (sys.Hostname) bits.push(escapeHtml(String(sys.Hostname)));
+  if (sys.OS) bits.push(escapeHtml(String(sys.OS)) + (sys.Build ? ` (build ${escapeHtml(String(sys.Build))})` : ""));
+  if (!bits.length) return "";
+  return `<div class="small muted" style="margin-top:6px">${label}: ${bits.join(" · ")}</div>`;
+}
+
+const LOCAL_MODE_HINT =
+  `<div class="small muted" style="margin-top:6px">Local mode: samples submitted via <b>Analyze</b> run on THIS machine — no snapshot rollback.</div>`;
+
+// Instrumentation checklist, same contract in both modes (local = host,
+// hyperv = guest via Get-GuestHealth). defender_rtp is guest-only and
+// INVERTED: on a detonation VM realtime protection must be off.
+function renderChecks(checks, mode) {
   if (!checks) return "";
-  const rows = Object.entries(LOCAL_CHECK_LABELS)
+  const rows = Object.entries(CHECK_LABELS)
     .map(([key, label]) => {
       const ok = checks[key] === true;
       // Guardian is optional by design (Secure Boot) -- amber, not red.
@@ -61,11 +107,14 @@ function renderLocalChecks(checks) {
       return `<div class="small"><span class="badge ${cls}">${ok ? "ok" : key === "guardian_driver" ? "off" : "missing"}</span> ${escapeHtml(label)}</div>`;
     })
     .join("");
+  const rtp = mode !== "local" && checks.defender_rtp !== undefined
+    ? `<div class="small"><span class="badge ${checks.defender_rtp === false ? "ok" : "bad"}">${checks.defender_rtp === false ? "off" : "ON"}</span> Defender realtime protection</div>`
+    : "";
   const sb =
     checks.secure_boot === true
       ? `<div class="small muted">Secure Boot: on (test-signed Guardian driver cannot load)</div>`
       : `<div class="small muted">Secure Boot: off</div>`;
-  return `<div style="margin-top:6px">${rows}${sb}</div>`;
+  return `<div style="margin-top:6px">${rows}${rtp}${sb}</div>`;
 }
 
 function renderVmStatus(status, err) {
@@ -89,7 +138,12 @@ function renderVmStatus(status, err) {
       ${status.IPAddress ? `<span class="mono">${escapeHtml(status.IPAddress)}</span>` : ""}
       ${status.Uptime ? `<span> · uptime ${escapeHtml(status.Uptime)}</span>` : ""}
     </div>
-    ${mode === "local" ? renderLocalChecks(status.Checks) : ""}`;
+    ${renderSystemInfo(mode === "local" ? status.LocalSystem : status.GuestSystem, mode === "local" ? "Local system" : "Guest system")}
+    ${status.Checks ? renderChecks(status.Checks, mode) : (mode !== "local" ? `<div class="small muted" style="margin-top:6px">${status.ChecksError ? "Guest checks unavailable: " + escapeHtml(String(status.ChecksError)) : "VM off — instrumentation checks unavailable."}</div>` : "")}
+    ${mode === "local" ? LOCAL_MODE_HINT : ""}
+    ${renderModeSwitch(mode)}`;
+  const switchBtn = document.getElementById("btn-switch-mode");
+  if (switchBtn) switchBtn.addEventListener("click", onSwitchMode);
 }
 
 function renderJobPanel(job) {

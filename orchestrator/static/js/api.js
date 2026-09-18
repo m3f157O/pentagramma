@@ -22,6 +22,21 @@ async function apiRequest(path, options = {}) {
 const Api = {
   health: () => apiRequest("/api/health"),
   vmStatus: () => apiRequest("/api/vm/status"),
+  fleet: () => apiRequest("/api/fleet"),
+  fleetDetail: (name) => apiRequest(`/api/fleet/${encodeURIComponent(name)}`),
+  setFleetCreds: (name, username, password) => apiRequest(`/api/fleet/${encodeURIComponent(name)}/credentials`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+  }),
+  deleteFleetCreds: (name) => apiRequest(`/api/fleet/${encodeURIComponent(name)}/credentials`, { method: "DELETE" }),
+  provisionFleet: (name, step) => apiRequest(`/api/fleet/${encodeURIComponent(name)}/provision/${encodeURIComponent(step)}`, { method: "POST" }),
+  getMode: () => apiRequest("/api/config/mode"),
+  setMode: (mode) => apiRequest("/api/config/mode", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  }),
   ensureSnapshot: () => apiRequest("/api/vm/snapshot", { method: "POST" }),
   restoreSnapshot: () => apiRequest("/api/vm/restore", { method: "POST" }),
 

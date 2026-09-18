@@ -4,7 +4,7 @@
 # Manual prerequisites (NOT automated by this script):
 #   - VM already exists (Gen 2, >= 4 GB RAM / 4 vCPU, Default Switch) with
 #     Windows installed and updated. This script NEVER creates VMs.
-#   - Guest user per config.yaml (vm_username/vm_password) exists, is a local
+#   - Guest user per config.yaml (hyperv.vms credentials) exists, is a local
 #     admin, and autologon is configured.
 #   - PowerShell Direct works from this elevated host.
 #   - WDAC / Code-Integrity policy: the current golden image enforces one
@@ -51,8 +51,8 @@ $guestAgentDir = "C:\SandboxAgent"
 $_cfgText = Get-Content (Join-Path $root "config\config.yaml") -Raw
 if (-not $VMName)       { $VMName = ([regex]::Match($_cfgText, 'analysis_vm:\s*"([^"]+)"')).Groups[1].Value }
 if (-not $SnapshotName) { $SnapshotName = ([regex]::Match($_cfgText, 'snapshot_name:\s*"([^"]+)"')).Groups[1].Value }
-$_vmUser = ([regex]::Match($_cfgText, 'vm_username:\s*"([^"]+)"')).Groups[1].Value
-$_vmPass = ([regex]::Match($_cfgText, 'vm_password:\s*"([^"]+)"')).Groups[1].Value
+$_vmUser = ([regex]::Match($_cfgText, 'username:\s*"([^"]+)"')).Groups[1].Value
+$_vmPass = ([regex]::Match($_cfgText, 'password:\s*"([^"]+)"')).Groups[1].Value
 if (-not $VMName -or -not $SnapshotName -or -not $_vmUser -or -not $_vmPass) {
     throw "config.yaml missing analysis_vm / snapshot_name / vm credentials"
 }

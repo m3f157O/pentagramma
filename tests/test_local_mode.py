@@ -14,7 +14,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from orchestrator.backends import make_backend  # noqa: E402
-from orchestrator.config import SandboxConfig  # noqa: E402
+from orchestrator.config import SandboxConfig, set_mode  # noqa: E402
 from orchestrator.hyperv import HyperVManager, LocalTransport  # noqa: E402
 
 SCRIPTS_DIR = str(Path(__file__).resolve().parent.parent / "scripts")
@@ -67,6 +67,138 @@ def test_config_default_mode_is_hyperv():
         cfg = SandboxConfig(_write_config(Path(td)))
         assert cfg.mode == "hyperv"
         assert cfg.is_local_mode is False
+
+
+# --- set_mode (GUI mode switch) -------------------------------------------------
+
+def test_set_mode_roundtrip_preserves_comments_and_backs_up():
+    with tempfile.TemporaryDirectory() as td:
+        p = _write_config(Path(td), "sandbox:\n  mode: hyperv            # hyperv | local\n")
+        prev = set_mode("local", p)
+        assert prev == "hyperv"
+        assert SandboxConfig(p).mode == "local"
+        text = p.read_text(encoding="utf-8")
+        assert "# hyperv | local" in text  # inline comment preserved
+        assert p.with_suffix(".yaml.bak").exists()  # one-time backup written
+        prev = set_mode("HYPERV", p)  # case-insensitive
+        assert prev == "local"
+        assert SandboxConfig(p).mode == "hyperv"
+        prev = set_mode("hyperv", p)  # no-op: no rewrite, no error
+        assert prev == "hyperv"
+
+
+def test_set_mode_rejects_garbage():
+    import pytest
+
+    with tempfile.TemporaryDirectory() as td:
+        p = _write_config(Path(td), "sandbox:\n  mode: hyperv\n")
+        with pytest.raises(ValueError):
+            set_mode("bogus", p)
+        with pytest.raises(ValueError):
+            set_mode("", p)
+        assert SandboxConfig(p).mode == "hyperv"  # untouched
+
+
+def test_set_mode_requires_sandbox_section_and_mode_key():
+    import pytest
+
+    with tempfile.TemporaryDirectory() as td:
+        p = _write_config(Path(td))  # no sandbox: section at all
+        with pytest.raises(ValueError):
+            set_mode("local", p)
+        # sandbox: section exists but the NEXT top-level section comes first
+        p2 = _write_config(Path(td), "sandbox:\ntelemetry:\n  sysmon_service_name: x\n")
+        with pytest.raises(ValueError):
+            set_mode("local", p2)
+
+
+# --- vm_creds (per-VM credential list) ------------------------------------------
+
+def test_vm_creds_list_hit():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text(
+            "hyperv:\n"
+            "  analysis_vm: a\n"
+            "  vms:\n"
+            "    - name: a\n"
+            "      username: gigi\n"
+            "      password: pw-a\n"
+            "    - name: b\n"
+            "      username: lab\n"
+            "      password: pw-b\n",
+            encoding="utf-8",
+        )
+        cfg = SandboxConfig(p)
+        assert cfg.vm_creds("a") == ("gigi", "pw-a")
+        assert cfg.vm_creds("b") == ("lab", "pw-b")
+        assert cfg.vm_creds("nonexistent") == (None, None)  # no hidden defaults
+
+
+def test_vm_creds_legacy_fallback():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text(
+            "hyperv:\n"
+            "  analysis_vm: vm\n"
+            "  vm_username: gigi\n"
+            "  vm_password: gigi\n",
+            encoding="utf-8",
+        )
+        cfg = SandboxConfig(p)
+        assert cfg.vm_creds("vm") == ("gigi", "gigi")  # legacy top-level keys still work
+
+
+def test_vm_creds_empty_when_unconfigured():
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "config.yaml"
+        p.write_text("hyperv:\n  analysis_vm: vm\n", encoding="utf-8")
+        assert SandboxConfig(p).vm_creds("vm") == (None, None)
+
+
+def test_vm_creds_vms_file_roundtrip_and_precedence():
+    """config/vms.yaml (GUI-managed) is written by set_vm_credentials and
+    takes precedence over the config.yaml hyperv.vms list."""
+    import orchestrator.config as config_mod
+
+    with tempfile.TemporaryDirectory() as td:
+        cfg_path = Path(td) / "config.yaml"
+        cfg_path.write_text(
+            "hyperv:\n"
+            "  analysis_vm: a\n"
+            "  vms:\n"
+            "    - name: a\n"
+            "      username: old\n"
+            "      password: oldpw\n",
+            encoding="utf-8",
+        )
+        vms_path = Path(td) / "vms.yaml"
+        with mock.patch.object(config_mod, "_vms_file_path", lambda: vms_path):
+            # vms.yaml wins once written
+            config_mod.set_vm_credentials("a", "gigi", "newpw")
+            assert SandboxConfig(cfg_path).vm_creds("a") == ("gigi", "newpw")
+            # update in place (same VM, no duplicate entry)
+            config_mod.set_vm_credentials("a", "gigi", "newpw2")
+            assert SandboxConfig(cfg_path).vm_creds("a") == ("gigi", "newpw2")
+            data = config_mod._read_vms_file()
+            assert len([e for e in data["vms"] if e["name"] == "a"]) == 1
+            # delete falls back to config.yaml list entry
+            assert config_mod.delete_vm_credentials("a") is True
+            assert SandboxConfig(cfg_path).vm_creds("a") == ("old", "oldpw")
+            assert config_mod.delete_vm_credentials("a") is False  # already gone
+
+
+def test_set_vm_credentials_validates_input():
+    import orchestrator.config as config_mod
+    import pytest
+
+    with tempfile.TemporaryDirectory() as td:
+        with mock.patch.object(config_mod, "_vms_file_path", lambda: Path(td) / "vms.yaml"):
+            with pytest.raises(ValueError):
+                config_mod.set_vm_credentials("", "u", "p")
+            with pytest.raises(ValueError):
+                config_mod.set_vm_credentials("vm", "", "p")
+        assert not (Path(td) / "vms.yaml").exists()
 
 
 def test_config_local_mode():
@@ -128,11 +260,35 @@ def test_local_transport_injects_localmode_flag():
 
 
 def test_local_transport_get_status_marks_mode():
+    import orchestrator.hyperv as hv_mod
+
+    hv_mod._LOCAL_STATUS_CACHE["data"] = None  # bypass the 30s TTL cache
     with tempfile.TemporaryDirectory() as td:
         lt = LocalTransport(FakeCfg(Path(td)))
         with mock.patch.object(HyperVManager, "_run_ps", lambda self, cmd, **p: {"VMName": "local", "Checks": {}}):
             status = lt.get_status()
         assert status["Mode"] == "local"
+
+
+def test_local_transport_get_status_ttl_cache():
+    import orchestrator.hyperv as hv_mod
+
+    hv_mod._LOCAL_STATUS_CACHE["data"] = None
+    hv_mod._LOCAL_STATUS_CACHE["ts"] = 0.0
+    with tempfile.TemporaryDirectory() as td:
+        lt = LocalTransport(FakeCfg(Path(td)))
+        calls = []
+
+        def fake(self, cmd, **p):
+            calls.append(cmd)
+            return {"VMName": "local", "Checks": {}}
+
+        with mock.patch.object(HyperVManager, "_run_ps", fake):
+            lt.get_status()
+            lt.get_status()
+            lt.get_status()
+        assert calls == ["Get-LocalStatus"]  # 3 polls, 1 probe
+        hv_mod._LOCAL_STATUS_CACHE["data"] = None  # leave clean for other tests
 
 
 def test_local_transport_hyperv_only_features_raise():
