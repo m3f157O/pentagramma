@@ -486,8 +486,11 @@ class LocalTransport(HyperVManager):
     def __init__(self, config: SandboxConfig):
         # Deliberately NOT super().__init__: the hyperv: section (incl.
         # analysis_vm) may be entirely absent in a standalone deployment.
+        # vm_name is always "local": this machine IS the analysis
+        # environment, and reports must not inherit the hyperv section's VM
+        # name when one happens to be configured alongside.
         self.config = config
-        self.vm_name = config.hyperv.get("analysis_vm", "local")
+        self.vm_name = "local"
         self.snapshot_name = config.hyperv.get("snapshot_name", "")
         self.script_path = Path(config.paths["scripts_dir"]) / "hyperv-vm.ps1"
         if not self.script_path.exists():

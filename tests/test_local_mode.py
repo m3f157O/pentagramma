@@ -89,7 +89,7 @@ def test_make_backend_local():
         cfg = SandboxConfig(_write_config(Path(td), "sandbox:\n  mode: local\n"))
         backend = make_backend(cfg)
         assert type(backend) is LocalTransport
-        assert backend.vm_name == "vm"  # falls back to hyperv.analysis_vm when present
+        assert backend.vm_name == "local"  # never leaks hyperv.analysis_vm into local-mode reports
 
 
 def test_local_transport_tolerates_missing_hyperv_section():
