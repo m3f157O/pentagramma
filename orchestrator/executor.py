@@ -17,8 +17,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from orchestrator import capa_analysis
 from orchestrator import sample_types
+from orchestrator.backends import make_backend
 from orchestrator.config import SandboxConfig
-from orchestrator.hyperv import HyperVManager
 from orchestrator.pid_lineage import build_pid_lineage
 from orchestrator.reporting import ReportGenerator
 from orchestrator.sigma_engine import SigmaEngine
@@ -28,7 +28,10 @@ from orchestrator.static_analysis import StaticAnalyzer
 class SandboxExecutor:
     def __init__(self, config: SandboxConfig):
         self.config = config
-        self.hv = HyperVManager(config)
+        # Backend selected by sandbox.mode: HyperVManager (default, dedicated
+        # VM) or LocalTransport (detonate on this machine -- docs/local-mode.md).
+        self.hv = make_backend(config)
+        self.is_local = config.is_local_mode
         self.reporter = ReportGenerator(config)
         self.telemetry_cfg = config.telemetry
         vt_api_key = config.static_analysis.get("vt_api_key") or os.environ.get("VT_API_KEY")
@@ -373,7 +376,7 @@ class SandboxExecutor:
         report = self.reporter.build_report(
             analysis_id=analysis_id,
             sample_metadata=sample_metadata,
-            vm_name=self.config.hyperv["analysis_vm"],
+            vm_name=self.hv.vm_name,
             vm_ip=None,
             runtime_seconds=0.0,
             telemetry_events=[],
@@ -511,7 +514,7 @@ class SandboxExecutor:
         # in config.yaml.
         aw_cfg = self.config.analysis.get("adaptive_window", {}) or {}
         aw_enabled = bool(aw_cfg.get("enabled", False))
-        vm_name = self.config.hyperv["analysis_vm"]
+        vm_name = self.hv.vm_name
         agent_dir_host = self._agent_dir_host()
         guest_agent_dir = self.telemetry_cfg.get("guest_agent_dir", "C:\\SandboxAgent")
         guest_output_file = self.telemetry_cfg.get("guest_output_file", "C:\\SandboxAgent\\telemetry.jsonl")
@@ -536,7 +539,8 @@ class SandboxExecutor:
         host_pcapng_path = logs_dir / f"{analysis_id}.pcapng"
 
         scr_cfg = self.config.screenshots
-        screenshots_enabled = scr_cfg.get("enabled", False)
+        # Screenshots are Hyper-V WMI thumbnails -- no equivalent in local mode.
+        screenshots_enabled = scr_cfg.get("enabled", False) and not self.is_local
         screenshots_dir = logs_dir / f"{analysis_id}_screenshots"
         screenshot_results: List[Dict[str, Any]] = []
         screenshot_stop_event = threading.Event()
@@ -582,6 +586,18 @@ class SandboxExecutor:
             # 2. Revert to clean state
             _step("restore_snapshot")
             self.hv.restore_snapshot()
+
+            # 2b. Local mode: no snapshot revert exists -- remove the previous
+            # run's runtime artifacts instead (the operator owns machine-level
+            # rollback). HyperVManager has no such method; LocalTransport does.
+            if self.is_local:
+                _step("clean_local_state")
+                try:
+                    self.hv.clean_local_state()
+                except Exception as exc:
+                    # Non-fatal: stale artifacts degrade isolation between
+                    # runs, not this run's correctness.
+                    execution_info["local_cleanup_error"] = str(exc)
 
             # 3. Start VM
             _step("start_vm")
@@ -769,6 +785,11 @@ class SandboxExecutor:
 
             # 8. Execute sample
             _step("execute_sample")
+            if interactive and self.is_local:
+                # The interactive console depends on Hyper-V (WMI thumbnails +
+                # PSDirect interactive session) -- force the standard path.
+                interactive = False
+                execution_info["interactive_unavailable"] = "local-mode"
             if interactive:
                 # Interactive launch: scheduled task on the visible console
                 # session (see run_analysis docstring). The guest-side merge

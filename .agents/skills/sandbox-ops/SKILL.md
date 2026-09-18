@@ -12,6 +12,7 @@ Operational knowledge for the Hyper-V malware sandbox (this repo). For interpret
 - Orchestrator: FastAPI/uvicorn on `http://127.0.0.1:18000`, started elevated via `start.ps1`. UI at `/ui/`, API under `/api/`.
 - VM: `pentagramma`, snapshot `SANDBOX_READY` (reverted automatically per run). Guest agent dir `C:\SandboxAgent`, sample drop folder `C:\Sandbox`.
 - Python: `.venv\Scripts\python.exe`. Config: `config\config.yaml`.
+- **Local mode** (`sandbox.mode: local`, docs/local-mode.md): the orchestrator's own machine is the analysis environment — no VM, no snapshot rollback, Guardian optional. Backend selected via `orchestrator/backends.py::make_backend` (LocalTransport subclasses HyperVManager and injects `-LocalMode` into every hyperv-vm.ps1 call, whose scriptblocks then run locally). VM-only routes (provision-*, harness, guardian stages, console) return 409 in local mode. Deploy via `scripts\package_local.ps1` + `scripts\install_local.ps1`. When the dashboard shows `mode: local`, do NOT attempt VM operations.
 
 ## Orchestrator lifecycle — read before touching processes
 

@@ -64,6 +64,11 @@ pip install -r requirements.txt
 Everything lives in `config/config.yaml`. Key sections:
 
 ```yaml
+# Execution backend: hyperv (default, dedicated VM) | local (this machine IS
+# the analysis environment -- standalone/emergency package, docs/local-mode.md)
+sandbox:
+  mode: hyperv
+
 hyperv:
   analysis_vm: "pentagramma"
   snapshot_name: "SANDBOX_READY"
@@ -156,6 +161,23 @@ Invoke-RestMethod -Uri "http://127.0.0.1:18000/api/reports/$($job.analysis_id)"
 
 Or drive it from an agent via the **MCP server** (below), or detonate a whole
 directory of samples with `scripts/detonate_corpus.py`.
+
+## Local mode (standalone package)
+
+For emergency evaluation / a portable analysis box, the orchestrator can
+detonate on **its own machine** instead of the VM — same pipeline, same report
+format, no Hyper-V dependency. Build a self-contained zip with
+`scripts\package_local.ps1`, then on the target machine (elevated, inside your
+own disposable VM — local mode has **no snapshot rollback**):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_local.ps1
+```
+
+The installer deploys the agent, handles the Secure Boot → Guardian driver
+decision (skipped when Secure Boot is on; detection works without it), and sets
+`sandbox.mode: local`. The dashboard shows a `mode: local` badge with an
+instrumentation checklist. Details + operator contract: `docs/local-mode.md`.
 
 ## Web dashboard
 
@@ -295,7 +317,9 @@ detection-regression gate (replays the labeled corpus); the rest are fast unit t
 ## Safety notes
 
 - The orchestrator **never deletes the VM** — it only reverts the snapshot.
-- Samples are copied in via PowerShell Direct / `Copy-VMFile` and **never run on the host**.
+- Samples are copied in via PowerShell Direct / `Copy-VMFile` and **never run on the host**
+  (except under the opt-in `sandbox.mode: local`, which is exactly that — see
+  `docs/local-mode.md` for its operator contract).
 - Keep the VM network isolated from production.
 - **No anti-VM / anti-debug hardening** is applied (deliberate). Defender stays **ON**
   (AMSI dependency). The golden image runs an enforced WDAC / Code-Integrity policy.

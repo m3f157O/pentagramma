@@ -13,9 +13,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.types import Scope
 
 from orchestrator import behavioral_signatures, cape_engine as cape_engine_mod, console, harness_validation, heuristics, jobs, local_trace, pcap_view, report_view, sample_types, static_analysis
+from orchestrator.backends import make_backend
 from orchestrator.config import get_config
 from orchestrator.executor import SandboxExecutor
-from orchestrator.hyperv import HyperVManager
+from orchestrator.hyperv import HyperVManager  # VM-gated provisioning endpoints (see _require_hyperv)
 from orchestrator.reporting import ReportGenerator
 from orchestrator.samples import SampleManager
 from orchestrator.sigma_engine import SigmaEngine
@@ -50,6 +51,22 @@ def _cfg():
     return get_config()
 
 
+def _backend():
+    """Execution backend for the configured sandbox.mode (hyperv|local)."""
+    return make_backend(_cfg())
+
+
+def _require_hyperv() -> None:
+    """VM-lifecycle, golden-image provisioning, harness/guardian stages and
+    the interactive console only exist against the Hyper-V backend. In local
+    mode (standalone package) these are hard-disabled, not silently no-op'd."""
+    if _cfg().is_local_mode:
+        raise HTTPException(
+            status_code=409,
+            detail="requires hyperv mode (sandbox.mode is 'local')",
+        )
+
+
 @app.get("/api/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
@@ -57,9 +74,14 @@ def health() -> Dict[str, str]:
 
 @app.get("/api/vm/status")
 def vm_status() -> Dict[str, Any]:
+    """Analysis-environment status: VM presence in hyperv mode, local
+    instrumentation health (Sysmon/agent/DLLs/Guardian/SecureBoot) in local
+    mode. Always carries a Mode field for the dashboard badge."""
+    cfg = _cfg()
     try:
-        hv = HyperVManager(_cfg())
-        return hv.get_status()
+        status = _backend().get_status()
+        status.setdefault("Mode", cfg.mode)
+        return status
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -304,9 +326,9 @@ def hookset() -> Dict[str, Any]:
 @app.post("/api/vm/restore")
 def vm_restore() -> Dict[str, Any]:
     """Manually restore the clean snapshot."""
+    _require_hyperv()
     try:
-        hv = HyperVManager(_cfg())
-        return hv.restore_snapshot()
+        return _backend().restore_snapshot()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -314,9 +336,9 @@ def vm_restore() -> Dict[str, Any]:
 @app.post("/api/vm/snapshot")
 def vm_ensure_snapshot() -> Dict[str, Any]:
     """Ensure the clean snapshot exists."""
+    _require_hyperv()
     try:
-        hv = HyperVManager(_cfg())
-        return hv.ensure_snapshot()
+        return _backend().ensure_snapshot()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -330,6 +352,7 @@ def vm_provision_etw_ti() -> Any:
     is actually running after the reboot, so the golden image is never
     modified for a build where the non-PPL autologger yields nothing.
     """
+    _require_hyperv()
     cfg = _cfg()
     agent_src = cfg.paths.get("agent_dir")
     guest_agent_dir = cfg.telemetry.get("guest_agent_dir", "C:\\SandboxAgent")
@@ -376,6 +399,7 @@ def vm_provision_dressing() -> Any:
     the golden snapshot. Re-capture is SKIPPED unless verification passes.
     Idempotent; safe to re-run to refresh the dressing.
     """
+    _require_hyperv()
     cfg = _cfg()
     agent_src = cfg.paths.get("agent_dir")
     guest_agent_dir = cfg.telemetry.get("guest_agent_dir", "C:\\SandboxAgent")
@@ -420,6 +444,7 @@ def vm_provision_noise_reduction() -> Any:
     provision-dressing, so the existing image gets it without full
     reprovisioning.
     """
+    _require_hyperv()
     cfg = _cfg()
     agent_src = cfg.paths.get("agent_dir")
     guest_agent_dir = cfg.telemetry.get("guest_agent_dir", "C:\\SandboxAgent")
@@ -467,6 +492,7 @@ def vm_provision_defender_off() -> Any:
     the golden image -- it just reports Tamper Protection is on so it can be
     turned off once via the VM's Windows Security UI.
     """
+    _require_hyperv()
     cfg = _cfg()
     agent_src = cfg.paths.get("agent_dir")
     guest_agent_dir = cfg.telemetry.get("guest_agent_dir", "C:\\SandboxAgent")
@@ -518,6 +544,7 @@ def vm_provision_defender_on() -> Any:
     enable -> reboot -> verify -> recapture-if-verified sequence, so a re-enable
     that didn't take never corrupts the golden image.
     """
+    _require_hyperv()
     cfg = _cfg()
     agent_src = cfg.paths.get("agent_dir")
     guest_agent_dir = cfg.telemetry.get("guest_agent_dir", "C:\\SandboxAgent")
@@ -574,6 +601,7 @@ def vm_provision_clean_archive() -> Any:
         steps.append({"step": name, "result": result})
         return result
 
+    _require_hyperv()
     try:
         hv = HyperVManager(_cfg())
         record("restore_snapshot", hv.restore_snapshot())
@@ -855,6 +883,7 @@ def get_job(job_id: str) -> Dict[str, Any]:
 
 @app.post("/api/console/open")
 def console_open() -> Dict[str, Any]:
+    _require_hyperv()
     try:
         return _console().open()
     except RuntimeError as exc:
@@ -873,6 +902,7 @@ def console_status() -> Dict[str, Any]:
 
 @app.get("/api/console/frame")
 def console_frame() -> Response:
+    _require_hyperv()
     try:
         data, frame_id = _console().frame()
     except FileNotFoundError as exc:
@@ -886,6 +916,7 @@ def console_frame() -> Response:
 
 @app.post("/api/console/input")
 def console_input(payload: Dict[str, Any]) -> Dict[str, Any]:
+    _require_hyperv()
     try:
         return _console().input(payload)
     except RuntimeError as exc:
@@ -1042,6 +1073,7 @@ def run_harness(
     completed/failed only). Shares the same single-flight slot as
     /api/jobs and /api/analyze.
     """
+    _require_hyperv()
     job = jobs.submit_harness_job(vm_name=vm_name, snapshot_name=snapshot_name, timeout_seconds=timeout)
     if job is None:
         raise HTTPException(
@@ -1070,6 +1102,7 @@ def run_guardian(action: str) -> Dict[str, Any]:
     field. Shares the single-flight VM slot with /api/jobs and
     /api/harness/run.
     """
+    _require_hyperv()
     try:
         job = jobs.submit_guardian_job(action)
     except ValueError as exc:

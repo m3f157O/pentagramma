@@ -20,6 +20,7 @@
       <a href="console.html">Console</a>
     </nav>
     <div style="margin-left:auto">
+      <span id="mode-badge" class="badge neutral" style="display:none" title="Execution backend (sandbox.mode)"></span>
       <span class="small muted">orchestrator</span>
       <span id="health-badge" class="badge neutral">checking&hellip;</span>
     </div>
@@ -28,7 +29,7 @@
   <main>
     <div class="grid cols-2">
       <div class="card">
-        <div class="card-title">Analysis VM</div>
+        <div class="card-title">Analysis Environment</div>
         <div id="vm-card-body">
           <div class="muted small">Loading&hellip;</div>
         </div>
@@ -111,6 +112,6 @@
 
   <script src="js/api.js?v=11"></script>
   <script src="js/poll.js?v=5"></script>
-  <script src="js/dashboard.js?v=5"></script>
+  <script src="js/dashboard.js?v=6"></script>
 </body>
 </html>

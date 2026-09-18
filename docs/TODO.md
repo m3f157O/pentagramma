@@ -1,5 +1,20 @@
 # PENTAGRAMMA — Work Queue (2026-09-05)
 
+## 0. Local mode (standalone package) — IMPLEMENTED 2026-09-12, live validation pending
+Orchestrator detonates on its own machine (`sandbox.mode: local`). Backend seam:
+`orchestrator/backends.py::make_backend` → `LocalTransport(HyperVManager)`
+injects `-LocalMode` into every hyperv-vm.ps1 call (scriptblocks run locally;
+VM lifecycle verbs are no-ops; `clean_local_state()` per-run hygiene). VM-only
+routes 409 in local mode; dashboard shows `mode: local` badge + instrumentation
+checklist (`Get-LocalStatus` verb). Installer `scripts/install_local.ps1`
+(Secure Boot → Guardian skip with reason; Defender off unless -KeepDefender);
+packager `scripts/package_local.ps1`. Docs: `docs/local-mode.md`.
+12 new unit tests (tests/test_local_mode.py); 149 total green.
+**Pending:** live validation in a throwaway VM (canary clean/0 exit-stop,
+tier1-crypto ≤8, one corpus sample malicious, Secure-Boot-on run shows guardian
+skipped); deferred: local screenshots, standard-user launch, self-extracting
+installer.
+
 ## 1. ~~Commit + push all uncommitted work~~ — DONE 2026-09-05
 Gate PASSED (test split 27 runs: recall 1.000, fpr 0.000, precision(mal) 1.000).
 Pushed: `46194dc` (noise reduction + FP fixes + corpora tooling) and `735ca57`

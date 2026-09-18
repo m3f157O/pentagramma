@@ -1,5 +1,8 @@
 #requires -RunAsAdministrator
-#requires -Modules Hyper-V
+
+# NOTE: no '#requires -Modules Hyper-V' -- local mode (-LocalMode, see
+# docs/local-mode.md) runs on machines WITHOUT the Hyper-V role; VM-mode
+# functions check the module in Assert-VMExists instead.
 
 <#
 .SYNOPSIS
@@ -11,6 +14,70 @@
 
 # No param() block — this script is driven entirely by $args.
 $ErrorActionPreference = "Stop"
+
+# Local mode (standalone package, docs/local-mode.md): when the -LocalMode
+# switch is present in $args, every guest-targeted operation runs on the
+# LOCAL machine instead of via PowerShell Direct. Set by the entrypoint at
+# the bottom of this script.
+$script:LocalMode = $false
+
+function Invoke-AnalysisCommand {
+    <#
+    .SYNOPSIS
+        Local-mode seam for guest scriptblock execution. Every guest
+        operation in this script is a hashtable of Invoke-Command splat
+        args; this wrapper either splats into Invoke-Command (PowerShell
+        Direct, default) or invokes the scriptblock LOCALLY with its
+        ArgumentList (-LocalMode). -ScriptBlock/-ArgumentList may override
+        the hashtable entries, mirroring the
+        'Invoke-Command @args -ScriptBlock {...}' call pattern.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [hashtable]$InvokeArgs,
+
+        [Parameter(Mandatory = $false)]
+        [scriptblock]$ScriptBlock,
+
+        [Parameter(Mandatory = $false)]
+        [object[]]$ArgumentList
+    )
+
+    if ($PSBoundParameters.ContainsKey('ScriptBlock')) { $InvokeArgs['ScriptBlock'] = $ScriptBlock }
+    if ($PSBoundParameters.ContainsKey('ArgumentList')) { $InvokeArgs['ArgumentList'] = $ArgumentList }
+    if ($script:LocalMode) {
+        $sb = $InvokeArgs.ScriptBlock
+        if ($null -eq $InvokeArgs.ArgumentList) {
+            $al = @()
+        } else {
+            $al = @($InvokeArgs.ArgumentList)
+        }
+        return (& $sb @al)
+    }
+    return (Invoke-Command @InvokeArgs)
+}
+
+function Copy-AnalysisFileToTarget {
+    <#
+    .SYNOPSIS
+        Local-mode seam for Copy-VMFile (host->guest file push): a plain
+        filesystem copy in local mode.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VMName,
+        [Parameter(Mandatory = $true)][string]$SourcePath,
+        [Parameter(Mandatory = $true)][string]$DestinationPath
+    )
+    if ($script:LocalMode) {
+        $parent = Split-Path -Parent $DestinationPath
+        if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+        Copy-Item -Path $SourcePath -Destination $DestinationPath -Force
+        return
+    }
+    Copy-VMFile -Name $VMName -SourcePath $SourcePath -DestinationPath $DestinationPath -CreateFullPath -FileSource Host -Force
+}
 
 function Test-SandboxPrerequisites {
     [CmdletBinding()]
@@ -34,6 +101,14 @@ function Assert-VMExists {
         [Parameter(Mandatory = $true)]
         [string]$VMName
     )
+
+    # Local mode: no VM exists -- the local machine IS the analysis
+    # environment. VM-mode additionally needs the Hyper-V module (no longer
+    # enforced by a #requires directive).
+    if ($script:LocalMode) { return $null }
+    if (-not (Get-Module -ListAvailable Hyper-V)) {
+        throw "Hyper-V PowerShell module not found (required unless -LocalMode)."
+    }
 
     $vm = Get-VM -Name $VMName -ErrorAction SilentlyContinue
     if (-not $vm) {
@@ -263,7 +338,7 @@ function Copy-SampleToVM {
     $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
     $invokeArgs = @{ VMName = $VMName; ScriptBlock = $prep; ArgumentList = $DestinationFolder }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    Invoke-Command @invokeArgs | Out-Null
+    Invoke-AnalysisCommand $invokeArgs | Out-Null
 
     # DestinationFileName lets the orchestrator give the guest copy a
     # synthetic name carrying the sample's real extension (e.g. sample.js)
@@ -272,7 +347,7 @@ function Copy-SampleToVM {
     # extension, so the guest file must have the correct one.
     $fileName = if ($DestinationFileName) { $DestinationFileName } else { Split-Path -Leaf $SamplePath }
     $destPath = Join-Path $DestinationFolder $fileName
-    Copy-VMFile -Name $VMName -SourcePath $SamplePath -DestinationPath $destPath -CreateFullPath -FileSource Host -Force
+    Copy-AnalysisFileToTarget -VMName $VMName -SourcePath $SamplePath -DestinationPath $destPath
 
     return [PSCustomObject]@{
         VMName          = $VMName
@@ -804,7 +879,7 @@ public class MiniDumpNative {
         ArgumentList = @($SamplePathInVM, $resolvedLauncherPath, $resolvedLauncherArguments, $resolvedWorkingDirectory, $TimeoutSeconds, $DumpsDir, $DumpIntervalSeconds, $MaxDumps, $MaxWorkingSetBytes, $PollIntervalMs, $BehavioralTracing.IsPresent, $MonitorDllPath, $MonitorLoaderPath, $MonitorPidFile, $MonitorPidWaitSeconds, $AdaptiveMinWindowSeconds, $AdaptiveIdleGraceSeconds, $ActivityFilePath, $AdoptedPidsFile, $MinRuntimeSeconds)
     }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Copy-AgentToVM {
@@ -842,14 +917,14 @@ function Copy-AgentToVM {
     }
     $invokeArgsPrep = @{ VMName = $VMName; ScriptBlock = $prep; ArgumentList = $DestinationDir }
     if ($cred) { $invokeArgsPrep['Credential'] = $cred }
-    Invoke-Command @invokeArgsPrep | Out-Null
+    Invoke-AnalysisCommand $invokeArgsPrep | Out-Null
 
     # Copy-VMFile only copies files, not directories recursively. Zip and copy.
     $zipPath = Join-Path $env:TEMP "SandboxAgent.zip"
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
     Compress-Archive -Path "$AgentSourceDir\*" -DestinationPath $zipPath -Force
 
-    Copy-VMFile -Name $VMName -SourcePath $zipPath -DestinationPath "$DestinationDir\agent.zip" -CreateFullPath -FileSource Host -Force
+    Copy-AnalysisFileToTarget -VMName $VMName -SourcePath $zipPath -DestinationPath "$DestinationDir\agent.zip"
 
     $unpack = {
         param($folder)
@@ -859,7 +934,7 @@ function Copy-AgentToVM {
     }
     $invokeArgsUnpack = @{ VMName = $VMName; ScriptBlock = $unpack; ArgumentList = $DestinationDir }
     if ($cred) { $invokeArgsUnpack['Credential'] = $cred }
-    Invoke-Command @invokeArgsUnpack | Out-Null
+    Invoke-AnalysisCommand $invokeArgsUnpack | Out-Null
 
     return [PSCustomObject]@{
         VMName          = $VMName
@@ -912,10 +987,10 @@ function Copy-SampleFolderToVM {
     }
     $invokeArgsPrep = @{ VMName = $VMName; ScriptBlock = $prep; ArgumentList = $DestinationFolder }
     if ($cred) { $invokeArgsPrep['Credential'] = $cred }
-    Invoke-Command @invokeArgsPrep | Out-Null
+    Invoke-AnalysisCommand $invokeArgsPrep | Out-Null
 
     $guestZip = "$DestinationFolder\_staging.zip"
-    Copy-VMFile -Name $VMName -SourcePath $StagingZipPath -DestinationPath $guestZip -CreateFullPath -FileSource Host -Force
+    Copy-AnalysisFileToTarget -VMName $VMName -SourcePath $StagingZipPath -DestinationPath $guestZip
 
     $unpack = {
         param($folder, $zip)
@@ -926,7 +1001,7 @@ function Copy-SampleFolderToVM {
     }
     $invokeArgsUnpack = @{ VMName = $VMName; ScriptBlock = $unpack; ArgumentList = @($DestinationFolder, $guestZip) }
     if ($cred) { $invokeArgsUnpack['Credential'] = $cred }
-    $extracted = Invoke-Command @invokeArgsUnpack
+    $extracted = Invoke-AnalysisCommand $invokeArgsUnpack
 
     return [PSCustomObject]@{
         VMName            = $VMName
@@ -977,7 +1052,7 @@ function Invoke-TelemetryInit {
     $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
     $invokeArgs = @{ VMName = $VMName; ScriptBlock = $scriptBlock; ArgumentList = $AgentDir, $Sources }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Invoke-TelemetryCollect {
@@ -1019,7 +1094,7 @@ function Invoke-TelemetryCollect {
     $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
     $invokeArgs = @{ VMName = $VMName; ScriptBlock = $scriptBlock; ArgumentList = $AgentDir, $Sources }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Copy-TelemetryFromVM {
@@ -1051,8 +1126,12 @@ function Copy-TelemetryFromVM {
     if ($cred) { $sessParams['Credential'] = $cred }
     $sess = $null
     try {
-        $sess = New-PSSession @sessParams
-        Copy-Item -FromSession $sess -Path $GuestSourcePath -Destination $HostDestinationPath -Force
+        if ($script:LocalMode) {
+            Copy-Item -Path $GuestSourcePath -Destination $HostDestinationPath -Force
+        } else {
+            $sess = New-PSSession @sessParams
+            Copy-Item -FromSession $sess -Path $GuestSourcePath -Destination $HostDestinationPath -Force
+        }
         $status = "copied"
     }
     catch {
@@ -1135,7 +1214,7 @@ function Invoke-NetworkCaptureStart {
         ArgumentList = $AgentDir, $OutputDir, $EtlFilename, $PcapngFilename, $MaxFileSizeMB, $SnaplenBytes, $Components
     }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Invoke-NetworkCaptureStop {
@@ -1197,7 +1276,7 @@ function Invoke-NetworkCaptureStop {
         ArgumentList = $AgentDir, $OutputDir, $EtlFilename, $PcapngFilename
     }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Invoke-ApitraceStart {
@@ -1273,7 +1352,7 @@ function Invoke-ApitraceStart {
         ArgumentList = $AgentDir, $OutputFile, $StopFile, $MaxSeconds, $PidsFile
     }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Invoke-ApitraceStop {
@@ -1333,7 +1412,7 @@ function Invoke-ApitraceStop {
         ArgumentList = $CollectorPid, $StopFile, $WaitSeconds
     }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Invoke-GuardianStart {
@@ -1411,7 +1490,7 @@ function Invoke-GuardianStart {
         ArgumentList = $AgentDir, $OutputFile, $StopFile, $MaxSeconds, $TargetImage, $DllX64, $DllX86
     }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Invoke-GuardianStop {
@@ -1469,7 +1548,7 @@ function Invoke-GuardianStop {
         ArgumentList = $AgentPid, $StopFile, $WaitSeconds
     }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Copy-NetworkCaptureFromVM {
@@ -1501,8 +1580,12 @@ function Copy-NetworkCaptureFromVM {
     if ($cred) { $sessParams['Credential'] = $cred }
     $sess = $null
     try {
-        $sess = New-PSSession @sessParams
-        Copy-Item -FromSession $sess -Path $GuestSourcePath -Destination $HostDestinationPath -Force
+        if ($script:LocalMode) {
+            Copy-Item -Path $GuestSourcePath -Destination $HostDestinationPath -Force
+        } else {
+            $sess = New-PSSession @sessParams
+            Copy-Item -FromSession $sess -Path $GuestSourcePath -Destination $HostDestinationPath -Force
+        }
         $size = (Get-Item $HostDestinationPath).Length
         $status = "copied"
     }
@@ -1558,10 +1641,18 @@ function Copy-ProcessDumpsFromVM {
     $sess = $null
     $files = @()
     try {
-        $sess = New-PSSession @sessParams
-        $remoteHasDumps = Invoke-Command -Session $sess -ScriptBlock { param($p) Test-Path $p } -ArgumentList $GuestSourceDir
+        if ($script:LocalMode) {
+            $remoteHasDumps = Test-Path $GuestSourceDir
+        } else {
+            $sess = New-PSSession @sessParams
+            $remoteHasDumps = Invoke-Command -Session $sess -ScriptBlock { param($p) Test-Path $p } -ArgumentList $GuestSourceDir
+        }
         if ($remoteHasDumps) {
-            Copy-Item -FromSession $sess -Path $GuestSourceDir -Destination $HostDestinationDir -Recurse -Force
+            if ($script:LocalMode) {
+                Copy-Item -Path $GuestSourceDir -Destination $HostDestinationDir -Recurse -Force
+            } else {
+                Copy-Item -FromSession $sess -Path $GuestSourceDir -Destination $HostDestinationDir -Recurse -Force
+            }
             $copiedDir = Join-Path $HostDestinationDir (Split-Path -Leaf $GuestSourceDir)
             if (Test-Path $copiedDir) {
                 $files = Get-ChildItem -Path $copiedDir -File | ForEach-Object {
@@ -1639,7 +1730,7 @@ function Copy-SandboxArchiveFromVM {
     $specPath = Join-Path (Split-Path -Parent $StagingDir) 'archive_pull_spec.json'
     $stageScript = Join-Path (Split-Path -Parent $StagingDir) 'archive_pull_stage.ps1'
     $candidates = @($GuestFileCandidates -split '\|' | Where-Object { $_ })
-    Invoke-Command @invokeArgs -ScriptBlock {
+    Invoke-AnalysisCommand $invokeArgs -ScriptBlock {
         param($specPath, $candidates, $stageScript, $stagingDir)
         $candidates | ConvertTo-Json -Compress | Set-Content -Path $specPath -Encoding ascii
         $body = @'
@@ -1668,11 +1759,11 @@ foreach ($p in $spec) {
     $staged = $false
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     while ($sw.Elapsed.TotalSeconds -lt 60) {
-        $staged = Invoke-Command @invokeArgs -ScriptBlock { param($p) Test-Path $p } -ArgumentList $marker
+        $staged = Invoke-AnalysisCommand $invokeArgs -ScriptBlock { param($p) Test-Path $p } -ArgumentList $marker
         if ($staged) { break }
         Start-Sleep -Seconds 1
     }
-    Invoke-Command @invokeArgs -ScriptBlock {
+    Invoke-AnalysisCommand $invokeArgs -ScriptBlock {
         Unregister-ScheduledTask -TaskName 'SandboxArchivePull' -Confirm:$false -ErrorAction SilentlyContinue
     } | Out-Null
     if (-not $staged) {
@@ -1685,10 +1776,18 @@ foreach ($p in $spec) {
     $sess = $null
     $files = @()
     try {
-        $sess = New-PSSession @sessParams
-        $hasStaging = Invoke-Command -Session $sess -ScriptBlock { param($p) Test-Path $p } -ArgumentList $StagingDir
+        if ($script:LocalMode) {
+            $hasStaging = Test-Path $StagingDir
+        } else {
+            $sess = New-PSSession @sessParams
+            $hasStaging = Invoke-Command -Session $sess -ScriptBlock { param($p) Test-Path $p } -ArgumentList $StagingDir
+        }
         if ($hasStaging) {
-            Copy-Item -FromSession $sess -Path $StagingDir -Destination $HostDestinationDir -Recurse -Force
+            if ($script:LocalMode) {
+                Copy-Item -Path $StagingDir -Destination $HostDestinationDir -Recurse -Force
+            } else {
+                Copy-Item -FromSession $sess -Path $StagingDir -Destination $HostDestinationDir -Recurse -Force
+            }
             $copiedDir = Join-Path $HostDestinationDir (Split-Path -Leaf $StagingDir)
             if (Test-Path $copiedDir) {
                 $files = Get-ChildItem -Path $copiedDir -File -Recurse | Where-Object { $_.Name -ne '_staged.txt' } | ForEach-Object {
@@ -1703,7 +1802,7 @@ foreach ($p in $spec) {
     }
     finally {
         if ($sess) { Remove-PSSession $sess -ErrorAction SilentlyContinue }
-        Invoke-Command @invokeArgs -ScriptBlock {
+        Invoke-AnalysisCommand $invokeArgs -ScriptBlock {
             param($p, $s, $spec) Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item $s, $spec -Force -ErrorAction SilentlyContinue
         } -ArgumentList $StagingDir, $stageScript, $specPath | Out-Null
     }
@@ -1753,7 +1852,7 @@ function Clear-SandboxArchive {
     # 1. Register + start a one-shot SYSTEM task that purges the archive
     #    contents and writes before/after stats as JSON.
     $cleanScript = "C:\SandboxAgent\archive_clean.ps1"
-    Invoke-Command @invokeArgs -ScriptBlock {
+    Invoke-AnalysisCommand $invokeArgs -ScriptBlock {
         param($cleanScript, $archiveDir, $resultPath)
         $body = @'
 $dir = 'ARCHIVE_DIR'
@@ -1793,16 +1892,16 @@ $after = Measure-Archive $dir
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $done = $false
     while ($sw.Elapsed.TotalSeconds -lt 900) {
-        $done = Invoke-Command @invokeArgs -ScriptBlock { param($p) Test-Path $p } -ArgumentList $ResultPath
+        $done = Invoke-AnalysisCommand $invokeArgs -ScriptBlock { param($p) Test-Path $p } -ArgumentList $ResultPath
         if ($done) { break }
         Start-Sleep -Seconds 3
     }
     $stats = $null
     if ($done) {
-        $raw = Invoke-Command @invokeArgs -ScriptBlock { param($p) Get-Content $p -Raw } -ArgumentList $ResultPath
+        $raw = Invoke-AnalysisCommand $invokeArgs -ScriptBlock { param($p) Get-Content $p -Raw } -ArgumentList $ResultPath
         $stats = $raw | ConvertFrom-Json
     }
-    Invoke-Command @invokeArgs -ScriptBlock {
+    Invoke-AnalysisCommand $invokeArgs -ScriptBlock {
         param($c, $r)
         Unregister-ScheduledTask -TaskName 'SandboxArchiveClean' -Confirm:$false -ErrorAction SilentlyContinue
         Remove-Item $c, $r -Force -ErrorAction SilentlyContinue
@@ -1870,16 +1969,24 @@ function Copy-DroppedFilesFromVM {
     $sess = $null
     $files = @()
     try {
-        $sess = New-PSSession @sessParams
+        if (-not $script:LocalMode) { $sess = New-PSSession @sessParams }
         $index = 0
         foreach ($guestPath in $pathList) {
             $originalName = Split-Path -Leaf $guestPath
             $destName = "{0:D4}_{1}" -f $index, $originalName
             $destPath = Join-Path $HostDestinationDir $destName
             try {
-                $exists = Invoke-Command -Session $sess -ScriptBlock { param($p) Test-Path $p } -ArgumentList $guestPath
+                if ($script:LocalMode) {
+                    $exists = Test-Path $guestPath
+                } else {
+                    $exists = Invoke-Command -Session $sess -ScriptBlock { param($p) Test-Path $p } -ArgumentList $guestPath
+                }
                 if ($exists) {
-                    Copy-Item -FromSession $sess -Path $guestPath -Destination $destPath -Force
+                    if ($script:LocalMode) {
+                        Copy-Item -Path $guestPath -Destination $destPath -Force
+                    } else {
+                        Copy-Item -FromSession $sess -Path $guestPath -Destination $destPath -Force
+                    }
                     if (Test-Path $destPath) {
                         $files += [PSCustomObject]@{
                             Filename     = $destName
@@ -2090,7 +2197,7 @@ function Invoke-GuestPython {
     }
     $invokeArgs = @{ VMName = $VMName; ScriptBlock = $scriptBlock; ArgumentList = $AgentDir, $ScriptName, $ScriptArgs }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Restart-SandboxGuest {
@@ -2246,7 +2353,7 @@ function Invoke-ConsoleInputServerStart {
     $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
     $invokeArgs = @{ VMName = $VMName; ScriptBlock = $scriptBlock; ArgumentList = @($AgentDir, $CredentialUsername, $ReadyTimeoutSeconds) }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Invoke-ConsoleInputServerStop {
@@ -2280,7 +2387,7 @@ function Invoke-ConsoleInputServerStop {
     $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
     $invokeArgs = @{ VMName = $VMName; ScriptBlock = $scriptBlock }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
 }
 
 function Invoke-SampleExecutionInteractive {
@@ -2397,14 +2504,80 @@ function Invoke-SampleExecutionInteractive {
                          $AgentDir, $CredentialUsername)
     }
     if ($cred) { $invokeArgs['Credential'] = $cred }
-    return Invoke-Command @invokeArgs
+    return Invoke-AnalysisCommand $invokeArgs
+}
+
+function Get-LocalSandboxStatus {
+    <#
+    .SYNOPSIS
+        Local-mode environment status: instrumentation health of THIS
+        machine instead of VM state. Consumed by the orchestrator's
+        /api/vm/status endpoint (dashboard "Analysis Environment" card).
+        Every check is defensive -- a broken probe reports $false, never
+        throws.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $sysmon = $false
+    try {
+        $svc = Get-Service -Name 'Sysmon64', 'Sysmon' -ErrorAction SilentlyContinue |
+               Where-Object { $_.Status -eq 'Running' } | Select-Object -First 1
+        $sysmon = [bool]$svc
+    } catch {}
+
+    $agentDir = 'C:\SandboxAgent'
+    $agentPresent = [bool](Test-Path $agentDir)
+    $dlls = $false
+    if ($agentPresent) {
+        $dlls = [bool]((Test-Path (Join-Path $agentDir 'monitor_x64.dll')) -and
+                       (Test-Path (Join-Path $agentDir 'monitor_x86.dll')) -and
+                       (Test-Path (Join-Path $agentDir 'monitor_loader.exe')))
+    }
+
+    $guardian = $false
+    try {
+        $gsvc = Get-CimInstance Win32_SystemDriver -Filter "Name='SandboxGuard'" -ErrorAction SilentlyContinue
+        $guardian = [bool]($gsvc -and $gsvc.State -eq 'Running')
+    } catch {}
+
+    $secureBoot = $false
+    try {
+        # Throws on non-UEFI / unsupported platforms -> treat as off
+        $secureBoot = [bool](Confirm-SecureBootUEFI)
+    } catch { $secureBoot = $false }
+
+    $uptime = ''
+    try {
+        $uptime = ((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).ToString('d\.hh\:mm\:ss')
+    } catch {}
+
+    return [PSCustomObject]@{
+        VMName    = 'local'
+        State     = 'Running'
+        Uptime    = $uptime
+        IPAddress = '127.0.0.1'
+        Mode      = 'local'
+        Checks    = [PSCustomObject]@{
+            sysmon          = $sysmon
+            agent_dir       = $agentPresent
+            monitor_dlls    = $dlls
+            guardian_driver = $guardian
+            secure_boot     = $secureBoot
+        }
+    }
 }
 
 # --- Entrypoint for CLI usage from Python orchestrator ---
 if ($args.Count -gt 0) {
-    $command = $args[0]
-    if ($args.Count -gt 1) {
-        $remainingArgs = $args[1..($args.Count - 1)]
+    # -LocalMode (appended by hyperv.py::LocalTransport._run_ps as a bare
+    # switch) is a GLOBAL flag, not a function parameter -- strip it before
+    # splatting the remaining args into the dispatched function.
+    $filteredArgs = @($args | Where-Object { "$_" -ne '-LocalMode' })
+    if ($filteredArgs.Count -lt $args.Count) { $script:LocalMode = $true }
+    $command = $filteredArgs[0]
+    if ($filteredArgs.Count -gt 1) {
+        $remainingArgs = $filteredArgs[1..($filteredArgs.Count - 1)]
     }
     else {
         $remainingArgs = @()
@@ -2417,6 +2590,7 @@ if ($args.Count -gt 0) {
         "Start-VM"                { Start-SandboxVM @remainingArgs | ConvertTo-Json }
         "Stop-VM"                 { Stop-SandboxVM @remainingArgs | ConvertTo-Json }
         "Get-Status"              { Get-SandboxVMStatus @remainingArgs | ConvertTo-Json }
+        "Get-LocalStatus"         { Get-LocalSandboxStatus | ConvertTo-Json -Depth 5 }
         "Copy-Sample"             { Copy-SampleToVM @remainingArgs | ConvertTo-Json }
         "Copy-SampleFolder"       { Copy-SampleFolderToVM @remainingArgs | ConvertTo-Json }
         "Execute-Sample"          { Invoke-SampleExecution @remainingArgs | ConvertTo-Json -Depth 5 }

@@ -550,6 +550,12 @@ class ReportGenerator:
                 "vm_name": vm_name,
                 "vm_ip": vm_ip,
                 "base_vhdx": self.config.hyperv.get("base_vhdx"),
+                # Execution backend (hyperv = dedicated VM; local = this
+                # machine, standalone package -- docs/local-mode.md). In local
+                # mode the sample ran with the orchestrator's elevated
+                # identity and no snapshot rollback exists.
+                "mode": self.config.mode,
+                "elevated": self.config.is_local_mode,
                 "runtime_seconds": runtime_seconds,
             },
             "summary": {

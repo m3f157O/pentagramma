@@ -462,3 +462,166 @@ class HyperVManager:
             MonitorPidFile=monitor_pid_file,
             AgentDir=agent_dir,
         )
+
+
+class LocalTransport(HyperVManager):
+    """Local-mode backend: the orchestrator's OWN machine is the analysis
+    environment (standalone/emergency package -- see docs/local-mode.md).
+
+    Reuses the exact same PowerShell helper and its battle-tested execution
+    scriptblocks; every call just carries ``-LocalMode``, which makes the
+    script invoke them locally instead of via PowerShell Direct. Only the
+    VM-lifecycle surface is redefined here:
+
+    - snapshot/VM power verbs become structured no-ops (the operator owns
+      machine hygiene -- there is no rollback);
+    - ``start_vm``/``get_status`` report the local machine;
+    - ``copy_agent`` is a no-op (the installer owns C:\\SandboxAgent
+      freshness -- a per-run wipe would also delete the agent venv and the
+      runtime artifacts of the run in progress);
+    - Hyper-V-only features (console thumbnails, interactive console input)
+      raise loudly -- callers gate on ``config.is_local_mode`` first.
+    """
+
+    def __init__(self, config: SandboxConfig):
+        # Deliberately NOT super().__init__: the hyperv: section (incl.
+        # analysis_vm) may be entirely absent in a standalone deployment.
+        self.config = config
+        self.vm_name = config.hyperv.get("analysis_vm", "local")
+        self.snapshot_name = config.hyperv.get("snapshot_name", "")
+        self.script_path = Path(config.paths["scripts_dir"]) / "hyperv-vm.ps1"
+        if not self.script_path.exists():
+            raise FileNotFoundError(f"PowerShell helper not found: {self.script_path}")
+
+    def _run_ps(self, command: str, **params) -> Dict[str, Any]:
+        # True renders as a bare `-LocalMode` switch; the script's entrypoint
+        # strips the token and flips every guest operation to local execution.
+        params["LocalMode"] = True
+        return super()._run_ps(command, **params)
+
+    # -- VM lifecycle: structured no-ops ------------------------------------
+
+    @staticmethod
+    def _skipped(verb: str) -> Dict[str, Any]:
+        return {"Status": "skipped", "Reason": "local-mode", "Verb": verb}
+
+    def ensure_snapshot(self) -> Dict[str, Any]:
+        return self._skipped("Ensure-Snapshot")
+
+    def restore_snapshot(self) -> Dict[str, Any]:
+        return self._skipped("Restore-Snapshot")
+
+    def recapture_snapshot(self) -> Dict[str, Any]:
+        return self._skipped("Recapture-Snapshot")
+
+    def stop_vm(self, force: bool = True) -> Dict[str, Any]:
+        return self._skipped("Stop-VM")
+
+    def restart_guest(self, timeout_seconds: int = 300) -> Dict[str, Any]:
+        return self._skipped("Restart-Guest")
+
+    def start_vm(self, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
+        # The "guest" is already running -- it's this machine. The IP is a
+        # readiness signal + report field only (no comms use it).
+        return {"VMName": "local", "State": "Running", "IPAddress": "127.0.0.1"}
+
+    def get_status(self) -> Dict[str, Any]:
+        status = self._run_ps("Get-LocalStatus")
+        if isinstance(status, dict):
+            status["Mode"] = "local"
+        return status
+
+    def copy_agent(self, agent_source_dir: str, destination_dir: str = "C:\\SandboxAgent") -> Dict[str, Any]:
+        # The installer deploys C:\SandboxAgent once; a per-run re-sync would
+        # wipe the venv and the run's own runtime artifacts.
+        return self._skipped("Copy-Agent")
+
+    # -- Hyper-V-only features: fail loudly ---------------------------------
+
+    def capture_screenshot(self, *args, **kwargs) -> Dict[str, Any]:
+        raise RuntimeError("screenshots require the Hyper-V backend (WMI thumbnails); disabled in local mode")
+
+    def console_input_server_start(self, *args, **kwargs) -> Dict[str, Any]:
+        raise RuntimeError("interactive console requires the Hyper-V backend; disabled in local mode")
+
+    def console_input_server_stop(self) -> Dict[str, Any]:
+        return self._skipped("Console-InputServer-Stop")
+
+    # -- Local-mode extras ----------------------------------------------------
+
+    def clean_local_state(self) -> Dict[str, Any]:
+        """Per-run hygiene (local mode has no snapshot revert): remove the
+        previous run's runtime artifacts so telemetry starts clean.
+
+        Safety: only deletes files under the CONFIGURED sandbox locations
+        (agent dir / sample destination folder / process-dumps dir), and only
+        known artifact names. Never touches anything else on the host.
+        """
+        removed: List[str] = []
+        errors: List[str] = []
+
+        agent_dir = Path(self.config.telemetry.get("guest_agent_dir", "C:\\SandboxAgent"))
+        dest_folder = Path(self.config.sample_execution.get("guest_destination_folder", "C:\\Sandbox"))
+        dumps_dir = Path(self.config.process_dumps.get("guest_output_dir", str(agent_dir / "dumps")))
+
+        # Exact known artifact files (under the agent dir)
+        bt = self.config.behavioral_tracing
+        g = self.config.guardian
+        net = self.config.network_capture
+        artifact_files = [
+            self.config.telemetry.get("guest_output_file", str(agent_dir / "telemetry.jsonl")),
+            str(agent_dir / "telemetry_baseline.json"),
+            bt.get("guest_apitrace_file", str(agent_dir / "apitrace.jsonl")),
+            bt.get("guest_apitrace_file", str(agent_dir / "apitrace.jsonl")) + ".pids",
+            bt.get("guest_stop_file", str(agent_dir / "apitrace_stop.flag")),
+            bt.get("guest_pid_file", str(agent_dir / "sample_pid.txt")),
+            g.get("guest_output_file", str(agent_dir / "guardian.jsonl")),
+            g.get("guest_stop_file", str(agent_dir / "guardian_stop.flag")),
+            str(Path(net.get("guest_output_dir", str(agent_dir))) / net.get("etl_filename", "network.etl")),
+            str(Path(net.get("guest_output_dir", str(agent_dir))) / net.get("pcapng_filename", "network.pcapng")),
+        ]
+
+        def _under(p: Path, root: Path) -> bool:
+            try:
+                p.resolve().relative_to(root.resolve())
+                return True
+            except (ValueError, OSError):
+                return False
+
+        allowed_roots = [agent_dir, dest_folder, dumps_dir]
+        for f in artifact_files:
+            p = Path(f)
+            if not any(_under(p, r) for r in allowed_roots):
+                errors.append(f"refused (outside sandbox dirs): {p}")
+                continue
+            try:
+                if p.is_file():
+                    p.unlink()
+                    removed.append(str(p))
+            except OSError as exc:
+                errors.append(f"{p}: {exc}")
+
+        # Directory contents (previous run's samples, dumps, interactive run dir)
+        for d in (dest_folder, dumps_dir, agent_dir / "interactive_run"):
+            if not d.is_dir():
+                continue
+            for child in d.iterdir():
+                try:
+                    if child.is_dir():
+                        import shutil
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink()
+                    removed.append(str(child))
+                except OSError as exc:
+                    errors.append(f"{child}: {exc}")
+
+        # Sysmon deleted-file archive grows unboundedly without VM revert.
+        # Previous run's harvest happens before this point in the flow, so
+        # clearing here loses nothing. Non-fatal.
+        try:
+            self.clear_sandbox_archive()
+        except Exception as exc:
+            errors.append(f"clear_sandbox_archive: {exc}")
+
+        return {"Status": "cleaned", "Removed": removed, "Errors": errors}

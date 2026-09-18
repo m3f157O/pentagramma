@@ -32,6 +32,20 @@ class SandboxConfig:
         return value
 
     @property
+    def sandbox(self) -> Dict[str, Any]:
+        return self._data.get("sandbox", {})
+
+    @property
+    def mode(self) -> str:
+        """Execution backend: 'hyperv' (default) or 'local' (detonate on the
+        orchestrator's own machine -- standalone/emergency package)."""
+        return str(self._data.get("sandbox", {}).get("mode", "hyperv")).lower()
+
+    @property
+    def is_local_mode(self) -> bool:
+        return self.mode == "local"
+
+    @property
     def paths(self) -> Dict[str, str]:
         return self._data.get("paths", {})
 

@@ -2,6 +2,7 @@ const STEP_LABELS = {
   started: "Started",
   ensure_snapshot: "Ensure clean snapshot",
   restore_snapshot: "Restore snapshot",
+  clean_local_state: "Clean local state",
   start_vm: "Start VM",
   copy_agent: "Copy telemetry agent",
   telemetry_init: "Initialize telemetry",
@@ -21,24 +22,74 @@ function setHealthBadge(ok) {
   el.className = "badge " + (ok ? "ok" : "bad");
 }
 
+// Execution-backend indicator (sandbox.mode). Local mode = standalone
+// package: the orchestrator's own machine is the detonation environment.
+function setModeBadge(mode) {
+  const el = document.getElementById("mode-badge");
+  if (!el) return;
+  if (!mode) {
+    el.style.display = "none";
+    return;
+  }
+  el.style.display = "";
+  el.textContent = "mode: " + mode;
+  el.className = "badge " + (mode === "local" ? "bad" : "neutral");
+}
+
+// Snapshot buttons are Hyper-V-only; local mode has no rollback to manage.
+function setVmControlsVisible(visible) {
+  for (const id of ["btn-ensure-snapshot", "btn-restore-snapshot"]) {
+    const b = document.getElementById(id);
+    if (b) b.style.display = visible ? "" : "none";
+  }
+}
+
+const LOCAL_CHECK_LABELS = {
+  sysmon: "Sysmon service",
+  agent_dir: "agent dir (C:\\SandboxAgent)",
+  monitor_dlls: "monitor DLLs + loader",
+  guardian_driver: "Guardian driver (optional)",
+};
+
+function renderLocalChecks(checks) {
+  if (!checks) return "";
+  const rows = Object.entries(LOCAL_CHECK_LABELS)
+    .map(([key, label]) => {
+      const ok = checks[key] === true;
+      // Guardian is optional by design (Secure Boot) -- amber, not red.
+      const cls = ok ? "ok" : key === "guardian_driver" ? "neutral" : "bad";
+      return `<div class="small"><span class="badge ${cls}">${ok ? "ok" : key === "guardian_driver" ? "off" : "missing"}</span> ${escapeHtml(label)}</div>`;
+    })
+    .join("");
+  const sb =
+    checks.secure_boot === true
+      ? `<div class="small muted">Secure Boot: on (test-signed Guardian driver cannot load)</div>`
+      : `<div class="small muted">Secure Boot: off</div>`;
+  return `<div style="margin-top:6px">${rows}${sb}</div>`;
+}
+
 function renderVmStatus(status, err) {
   const el = document.getElementById("vm-card-body");
   if (err) {
-    el.innerHTML = `<div class="error-text small">Unable to reach VM status: ${escapeHtml(err.message)}</div>`;
+    el.innerHTML = `<div class="error-text small">Unable to reach environment status: ${escapeHtml(err.message)}</div>`;
     return;
   }
   if (!status) {
-    el.innerHTML = `<div class="muted small">Paused while a job is running (it owns the VM).</div>`;
+    el.innerHTML = `<div class="muted small">Paused while a job is running (it owns the environment).</div>`;
     return;
   }
+  const mode = status.Mode || "hyperv";
+  setModeBadge(mode);
+  setVmControlsVisible(mode !== "local");
   const stateBadge = status.State === "Running" ? "ok" : "neutral";
   el.innerHTML = `
-    <div class="card-value">${escapeHtml(status.VMName || "-")}</div>
+    <div class="card-value">${escapeHtml(status.VMName || "-")}${mode === "local" ? ' <span class="badge bad">local mode</span>' : ""}</div>
     <div class="card-sub">
       <span class="badge ${stateBadge}">${escapeHtml(status.State || "unknown")}</span>
       ${status.IPAddress ? `<span class="mono">${escapeHtml(status.IPAddress)}</span>` : ""}
       ${status.Uptime ? `<span> · uptime ${escapeHtml(status.Uptime)}</span>` : ""}
-    </div>`;
+    </div>
+    ${mode === "local" ? renderLocalChecks(status.Checks) : ""}`;
 }
 
 function renderJobPanel(job) {
