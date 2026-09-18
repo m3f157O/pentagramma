@@ -76,6 +76,7 @@ class HyperVManager:
             "Clear-SandboxArchive",
             "Invoke-GuestPython",
             "Get-GuestHealth",
+            "Get-TelemetryTail",
             "Restart-Guest",
             "Console-InputServer-Start",
             "Console-InputServer-Stop",
@@ -365,6 +366,12 @@ class HyperVManager:
             StopFile=stop_file,
             WaitSeconds=wait_seconds,
         )
+
+    def tail_telemetry(self, path: str, offset: int = 0) -> Dict[str, Any]:
+        """Incremental tail of a telemetry JSONL file (live run streaming).
+        Works in both modes: PSDirect into the VM (hyperv) or in-process on
+        the host (local, via the -LocalMode seam)."""
+        return self._run_ps("Get-TelemetryTail", Path=path, Offset=offset)
 
     def copy_agent(self, agent_source_dir: str, destination_dir: str = "C:\\SandboxAgent") -> Dict[str, Any]:
         return self._run_ps(

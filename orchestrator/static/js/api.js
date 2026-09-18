@@ -32,6 +32,7 @@ const Api = {
   deleteFleetCreds: (name) => apiRequest(`/api/fleet/${encodeURIComponent(name)}/credentials`, { method: "DELETE" }),
   provisionFleet: (name, step) => apiRequest(`/api/fleet/${encodeURIComponent(name)}/provision/${encodeURIComponent(step)}`, { method: "POST" }),
   getMode: () => apiRequest("/api/config/mode"),
+  activeJobEvents: (offset) => apiRequest(`/api/jobs/active/events?offset=${offset}`),
   setMode: (mode) => apiRequest("/api/config/mode", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

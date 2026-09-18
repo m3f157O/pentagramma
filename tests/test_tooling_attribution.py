@@ -109,6 +109,18 @@ def test_real_defender_threat_kept():
     assert alerts[0]["in_sample_scope"] is True
 
 
+def test_mptest_agent_dir_path_always_dropped():
+    # 2026-09-18 regression: Defender engine 4.18.26080 flagged our own
+    # defender_manager.cpython-311.pyc (constant-folding put the AMSI test
+    # string in the .pyc despite source fragmentation). Any MpTest detection
+    # under the agent dir is our tooling by construction, at ANY timestamp.
+    ev = _defender_event("Virus:Win32/MpTest!amsi")
+    ev["data"]["Path"] = r"file:_C:\SandboxAgent\__pycache__\defender_manager.cpython-311.pyc"
+    ev["data"]["Detection Time"] = "2026-09-03T18:05:30.000Z"  # AFTER sample start
+    alerts = heuristics.detect_defender_threats([ev], sample_start=datetime(2026, 9, 3, 18, 5, 0))
+    assert alerts == []
+
+
 # ---------------------------------------------------------------------------
 # OS-noise scope-leak suppression (2026-09-05): the benign canary's entire
 # 12-point score was these artifacts (monitor-DLL ImageLoad + apitrace pipe

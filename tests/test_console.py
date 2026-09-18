@@ -13,7 +13,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from orchestrator.console import ConsoleManager  # noqa: E402
+from orchestrator.console import ConsoleManager, get_console_manager  # noqa: E402
+import orchestrator.console as console_mod  # noqa: E402
 
 
 def make_config():
@@ -56,6 +57,34 @@ def test_scale_falls_back_to_config_resolution():
     mgr = make_mgr()
     assert mgr._guest_resolution is None
     assert mgr._scale_to_guest(1.0, 1.0) == (1279, 799)
+
+
+# --- per-VM registry (fleet console) ------------------------------------------
+
+def _reset_registry():
+    console_mod._console_managers.clear()
+
+
+def test_registry_keyed_per_vm():
+    _reset_registry()
+    cfg = make_config()
+    a = get_console_manager(cfg, vm_name="vm-a")
+    b = get_console_manager(cfg, vm_name="vm-b")
+    assert a is not b
+    assert a.hv.vm_name == "vm-a"
+    assert b.hv.vm_name == "vm-b"
+    assert get_console_manager(cfg, vm_name="vm-a") is a  # same instance
+
+
+def test_registry_default_is_analysis_vm():
+    _reset_registry()
+    cfg = make_config()
+    default = get_console_manager(cfg)
+    assert default.hv.vm_name == "test-vm"
+    # executor lookup path: create=False + explicit vm_name finds it
+    assert get_console_manager(create=False, vm_name="test-vm") is default
+    # ...while a different VM yields None (no taint from other consoles)
+    assert get_console_manager(create=False, vm_name="someone-else") is None
 
 
 def test_scale_rejects_out_of_range():

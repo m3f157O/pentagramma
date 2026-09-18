@@ -2621,6 +2621,62 @@ function Get-GuestHealth {
     return $result
 }
 
+function Get-TelemetryTail {
+    <#
+    .SYNOPSIS
+        Incremental tail of a telemetry JSONL file (live run streaming).
+        Reads from byte -Offset to EOF (cap 256 KB per call) and returns the
+        new offset. The collector holds the file open, so FileShare ReadWrite
+        is mandatory. Runs in the guest (hyperv mode) or in-process (local
+        mode) via the standard Invoke-AnalysisCommand seam.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $false)]
+        [string]$VMName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $false)]
+        [long]$Offset = 0,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialUsername,
+
+        [Parameter(Mandatory = $false)]
+        [string]$CredentialPassword
+    )
+
+    $tailScript = {
+        param($TailPath, $TailOffset)
+        if (-not (Test-Path $TailPath)) {
+            return [PSCustomObject]@{ Offset = 0; Text = '' }
+        }
+        $fs = $null
+        try {
+            $fs = [System.IO.File]::Open($TailPath, [System.IO.FileMode]::Open,
+                                         [System.IO.FileAccess]::Read,
+                                         [System.IO.FileShare]::ReadWrite)
+            if ($TailOffset -gt $fs.Length) { $TailOffset = 0 }  # rotated/truncated
+            $fs.Position = $TailOffset
+            $cap = 262144
+            $toRead = [Math]::Min($cap, $fs.Length - $TailOffset)
+            $buf = New-Object byte[] $toRead
+            $read = $fs.Read($buf, 0, $toRead)
+            $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $read)
+            return [PSCustomObject]@{ Offset = $TailOffset + $read; Text = $text }
+        } finally {
+            if ($fs) { $fs.Dispose() }
+        }
+    }
+
+    $invokeArgs = @{ VMName = $VMName; ScriptBlock = $tailScript; ArgumentList = @($Path, $Offset) }
+    $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
+    if ($cred) { $invokeArgs['Credential'] = $cred }
+    return Invoke-AnalysisCommand $invokeArgs
+}
+
 function Get-FleetVMs {
     <#
     .SYNOPSIS
@@ -2707,6 +2763,7 @@ if ($args.Count -gt 0) {
         "Get-Status"              { Get-SandboxVMStatus @remainingArgs | ConvertTo-Json }
         "Get-LocalStatus"         { Get-LocalSandboxStatus | ConvertTo-Json -Depth 5 }
         "Get-FleetVMs"            { $r = @(Get-FleetVMs); ConvertTo-Json -InputObject $r -Depth 5 }
+        "Get-TelemetryTail"       { Get-TelemetryTail @remainingArgs | ConvertTo-Json -Depth 5 }
         "Get-GuestHealth"         { Get-GuestHealth @remainingArgs | ConvertTo-Json -Depth 5 }
         "Copy-Sample"             { Copy-SampleToVM @remainingArgs | ConvertTo-Json }
         "Copy-SampleFolder"       { Copy-SampleFolderToVM @remainingArgs | ConvertTo-Json }

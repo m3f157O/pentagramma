@@ -35,21 +35,31 @@ GUEST_SERVER_SOURCE = PROJECT_ROOT / "agent" / "windows" / "console_input_server
 
 ALLOWED_ACTIONS = {"click", "rightclick", "dblclick", "move", "wheel", "key", "text", "screeninfo"}
 
-# Module-level singleton: main.py and executor.py must see the SAME manager
-# (the executor consults it for report tagging). Lazily created by main.py;
-# executor only ever calls get_console_manager(create=False).
-_console_manager: Optional["ConsoleManager"] = None
+# Module-level registry: main.py and executor.py must see the SAME manager
+# per VM (the executor consults it for report tagging). Keyed by VM name;
+# vm_name=None maps to the configured analysis VM (backward compatible).
+_console_managers: Dict[str, "ConsoleManager"] = {}
 _console_manager_lock = threading.Lock()
 
 
-def get_console_manager(config: Optional[SandboxConfig] = None, create: bool = True) -> Optional["ConsoleManager"]:
-    global _console_manager
+def get_console_manager(
+    config: Optional[SandboxConfig] = None,
+    create: bool = True,
+    vm_name: Optional[str] = None,
+) -> Optional["ConsoleManager"]:
     with _console_manager_lock:
-        if _console_manager is None and create:
+        key = vm_name or (config.hyperv.get("analysis_vm") if config else None)
+        if key is None:
+            if not create:
+                return None
+            raise ValueError("vm_name required (no config to derive the analysis VM from)")
+        mgr = _console_managers.get(key)
+        if mgr is None and create:
             if config is None:
                 raise ValueError("config required to create the console manager")
-            _console_manager = ConsoleManager(config)
-        return _console_manager
+            mgr = ConsoleManager(config, vm_name=key)
+            _console_managers[key] = mgr
+        return mgr
 
 
 def _utcnow() -> datetime:
@@ -57,10 +67,10 @@ def _utcnow() -> datetime:
 
 
 class ConsoleManager:
-    def __init__(self, config: SandboxConfig):
+    def __init__(self, config: SandboxConfig, vm_name: Optional[str] = None):
         self.config = config
         self.console_cfg = config.console
-        self.hv = HyperVManager(config)
+        self.hv = HyperVManager(config, vm_name=vm_name)
         self._lock = threading.Lock()
 
         self._open = False

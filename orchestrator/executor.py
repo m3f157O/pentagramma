@@ -1225,7 +1225,9 @@ class SandboxExecutor:
         report["interactive_launch"] = bool(interactive)
         try:
             from orchestrator.console import get_console_manager
-            console_mgr = get_console_manager(create=False)
+            # Only a console attached to THIS run's environment taints the
+            # report; fleet console sessions on other VMs are irrelevant.
+            console_mgr = get_console_manager(create=False, vm_name=self.hv.vm_name)
             if console_mgr is not None and console_mgr.used_between(analysis_started_at, datetime.now(timezone.utc)):
                 report["interactive_console"] = True
         except Exception:

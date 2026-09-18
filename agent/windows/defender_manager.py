@@ -60,7 +60,13 @@ _STATUS_FIELDS = [
 # defender_manager.py itself in the guest (whose Defender is armed -- a host
 # exclusion doesn't cover it). We only ever form the whole string in memory,
 # passed to a throwaway child powershell.
-_AMSI_TEST_STRING = "AMSI Test " + "Sample: " + "7e72c3ce-861b-" + "4339-8740-" + "0ac1484c1386"
+#
+# 2026-09-18: '"a" + "b"' literal concatenation is CONSTANT-FOLDED at compile
+# time, so the contiguous string still landed in __pycache__\*.pyc -- and
+# Defender engine 4.18.26080 started flagging exactly that file mid-run
+# (regression: benign canary scored suspicious/25). A method call is never
+# folded, so the .pyc now stores only harmless fragments.
+_AMSI_TEST_STRING = " ".join(["AMSI", "Test", "Sample:", "7e72c3ce-861b-4339-8740-0ac1484c1386"])
 
 # GPO path for "Turn off real-time protection" -- distinct from the top-level
 # key defender_tampering.ps1 exercises (see module docstring).

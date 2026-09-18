@@ -13,19 +13,56 @@ const btnClose = document.getElementById("btn-close");
 
 let consoleOpen = false;
 let frameTimer = null;
+let currentVm = null;  // null = configured analysis VM (server default)
 
 // --- Api surface (defined here, not api.js: console endpoints only) ---
 const ConsoleApi = {
-  open: () => apiRequest("/api/console/open", { method: "POST" }),
-  close: () => apiRequest("/api/console/close", { method: "POST" }),
-  status: () => apiRequest("/api/console/status"),
-  input: (evt) => apiRequest("/api/console/input", {
+  open: () => apiRequest(`/api/console/open${vmQuery()}`, { method: "POST" }),
+  close: () => apiRequest(`/api/console/close${vmQuery()}`, { method: "POST" }),
+  status: () => apiRequest(`/api/console/status${vmQuery()}`),
+  input: (evt) => apiRequest(`/api/console/input${vmQuery()}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(evt),
   }),
-  frameUrl: () => `/api/console/frame?ts=${Date.now()}`,
+  frameUrl: () => `/api/console/frame?ts=${Date.now()}${currentVm ? `&vm=${encodeURIComponent(currentVm)}` : ""}`,
 };
+
+function vmQuery() {
+  return currentVm ? `?vm=${encodeURIComponent(currentVm)}` : "";
+}
+
+// Environment picker: running hyperv VMs from the fleet inventory. Default
+// (empty selection) = the configured analysis VM.
+async function loadVmPicker() {
+  const picker = document.getElementById("vm-picker");
+  if (!picker) return;
+  try {
+    const data = await Api.fleet();
+    const vms = (data.entries || []).filter((e) => e.type === "hyperv");
+    picker.innerHTML = vms.map((e) =>
+      `<option value="${escapeHtml(e.name)}" ${e.active ? "selected" : ""} ${e.state !== "Running" ? "disabled" : ""}>` +
+      `${escapeHtml(e.name)}${e.active ? " (active)" : ""}${e.state !== "Running" ? ` — ${escapeHtml(e.state || "?")}` : ""}</option>`
+    ).join("");
+    const active = vms.find((e) => e.active);
+    currentVm = active ? active.name : (vms[0] ? vms[0].name : null);
+  } catch (e) {
+    picker.innerHTML = '<option value="">fleet unavailable</option>';
+  }
+}
+
+async function onVmPickerChange(ev) {
+  const next = ev.target.value || null;
+  if (next === currentVm) return;
+  if (consoleOpen) {
+    try { await ConsoleApi.close(); } catch (e) { /* closing the old VM's session best-effort */ }
+  }
+  currentVm = next;
+  consoleOpen = false;
+  badgeEl.textContent = "closed";
+  badgeEl.className = "badge neutral";
+  statusEl.textContent = currentVm ? `environment: ${currentVm}` : "";
+}
 
 // --- frames ---------------------------------------------------------------
 function scheduleFrame() {
@@ -157,6 +194,8 @@ async function refreshJob() {
   }
 }
 
-refreshStatus();
+const vmPicker = document.getElementById("vm-picker");
+if (vmPicker) vmPicker.addEventListener("change", onVmPickerChange);
+loadVmPicker().then(refreshStatus);
 startPoll(refreshStatus, 4000);
 startPoll(refreshJob, 4000);

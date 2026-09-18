@@ -299,6 +299,61 @@ async function refreshActiveJobDetail() {
   }
 }
 
+// ------------------------------------------------------ live telemetry ---
+// While a job runs, stream the environment's telemetry.jsonl incrementally
+// (2s poll, byte-offset tail). Purely a view: nothing here affects the run.
+let liveTailOffset = 0;
+let liveTailJobId = null;
+const LIVE_TAIL_MAX_LINES = 300;
+
+function renderLiveTailLine(raw) {
+  let ev;
+  try {
+    ev = JSON.parse(raw);
+  } catch (e) {
+    return null;  // partial/garbled line -- skipped (offset stays safe)
+  }
+  const ts = (ev.timestamp || "").slice(11, 19);
+  const src = ev.source || "?";
+  const type = ev.event_type || ev.EventID || "?";
+  const data = ev.data || {};
+  const detail = data.Image || data.TargetFilename || data.Details || data.CommandLine || "";
+  const short = String(detail).split(/[\\/]/).pop().slice(0, 60);
+  return `<div>${escapeHtml(ts)} <span class="muted">${escapeHtml(src)}</span> ${escapeHtml(String(type))} <span class="muted">${escapeHtml(short)}</span></div>`;
+}
+
+async function refreshLiveTelemetry() {
+  const card = document.getElementById("live-telemetry-card");
+  const body = document.getElementById("live-telemetry-body");
+  const meta = document.getElementById("live-telemetry-meta");
+  if (!card || !body) return;
+  if (!state.activeJobId) {
+    card.style.display = "none";
+    liveTailOffset = 0;
+    liveTailJobId = null;
+    return;
+  }
+  if (liveTailJobId !== state.activeJobId) {
+    liveTailOffset = 0;
+    liveTailJobId = state.activeJobId;
+    body.innerHTML = "";
+  }
+  card.style.display = "";
+  try {
+    const r = await Api.activeJobEvents(liveTailOffset);
+    liveTailOffset = r.offset;
+    const html = (r.events || []).map(renderLiveTailLine).filter(Boolean).join("");
+    if (html) {
+      body.insertAdjacentHTML("beforeend", html);
+      while (body.childElementCount > LIVE_TAIL_MAX_LINES) body.removeChild(body.firstChild);
+      body.scrollTop = body.scrollHeight;
+    }
+    if (meta) meta.textContent = `· ${body.childElementCount} events shown`;
+  } catch (e) {
+    if (meta) meta.textContent = "· tail unavailable (" + e.message + ")";
+  }
+}
+
 function setSubmitStatus(msg, isError) {
   const el = document.getElementById("submit-status");
   el.textContent = msg;
@@ -441,3 +496,4 @@ startPoll(refreshHealth, 10000);
 startPoll(refreshVm, 5000);
 startPoll(refreshJobsList, 5000);
 startPoll(refreshActiveJobDetail, 2000);
+startPoll(refreshLiveTelemetry, 2000);

@@ -410,6 +410,14 @@ def detect_defender_threats(events: List[Dict[str, Any]],
             continue
         data = event.get("data") or {}
         if "mptest" in str(data.get("Threat Name") or "").lower():
+            # 2026-09-18: Defender engine 4.18.26080 started flagging our own
+            # agent payload (defender_manager.*.pyc carried the folded AMSI
+            # test string -- fixed at the source, but any detection whose Path
+            # is under the agent dir is OUR tooling by construction; the
+            # sample never legitimately lives there).
+            path_str = str(data.get("Path") or "").lower()
+            if "sandboxagent" in path_str:
+                continue
             det = _parse_sysmon_time(data.get("Detection Time") or event.get("timestamp"))
             if sample_start is None or det is None or det < sample_start:
                 continue  # our own AMSI readiness probe (see docstring)

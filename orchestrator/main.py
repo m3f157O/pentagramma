@@ -45,13 +45,6 @@ def _local_trace() -> local_trace.LocalTraceManager:
     return _local_trace_mgr
 
 
-def _console() -> console.ConsoleManager:
-    """The singleton interactive-console manager (see orchestrator/console.py)."""
-    mgr = console.get_console_manager(_cfg())
-    assert mgr is not None
-    return mgr
-
-
 # Shared config and helpers (created per request to keep it simple)
 def _cfg():
     return get_config()
@@ -337,6 +330,31 @@ def fleet_provision(name: str, step: str) -> Dict[str, Any]:
     except Exception as exc:
         return {"status": "failed", "step": step, "target": name, "error": str(exc)}
     return {"status": "ok", "step": step, "target": name, "result": result}
+
+
+@app.get("/api/jobs/active/events")
+def active_job_events(offset: int = 0) -> Dict[str, Any]:
+    """Live telemetry tail for the currently running analysis: incrementally
+    reads the environment's telemetry.jsonl (guest via PSDirect in hyperv
+    mode, host file in local mode) from a byte offset. 409 when no job is
+    active -- finished runs have their events in the report."""
+    if jobs.get_active_job_id() is None:
+        raise HTTPException(status_code=409, detail="no active job")
+    cfg = _cfg()
+    path = cfg.telemetry.get("guest_output_file", "C:\\SandboxAgent\\telemetry.jsonl")
+    try:
+        tail = _backend().tail_telemetry(path, offset)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"telemetry tail failed: {exc}") from exc
+    text = tail.get("Text") or ""
+    # Split into lines; drop a trailing partial line (collector mid-write) --
+    # it will be re-read from the adjusted offset next poll.
+    lines = text.splitlines()
+    new_offset = tail.get("Offset", offset)
+    if lines and not text.endswith(("\n", "\r")):
+        partial = lines.pop()
+        new_offset -= len(partial.encode("utf-8", errors="replace"))
+    return {"offset": new_offset, "events": lines}
 
 
 # A full Sigma rule-parse is ~5s, so cache the engine across requests rather
@@ -1134,30 +1152,42 @@ def get_job(job_id: str) -> Dict[str, Any]:
 # unless the console is explicitly opened. Opening it during a run tags the
 # report (interactive_console: true) -- interaction changes the detonation.
 
+def _console(vm: Optional[str] = None) -> console.ConsoleManager:
+    """Console manager for a fleet VM (default: the configured analysis VM)."""
+    cfg = _cfg()
+    if vm and vm != cfg.hyperv.get("analysis_vm"):
+        # Any registered VM (config.yaml hyperv.vms or GUI vms.yaml) is valid.
+        if vm not in registered_vm_credentials(cfg.hyperv):
+            raise HTTPException(status_code=404, detail=f"unknown VM {vm!r} (not in the credential registry)")
+    mgr = console.get_console_manager(cfg, vm_name=vm)
+    assert mgr is not None
+    return mgr
+
+
 @app.post("/api/console/open")
-def console_open() -> Dict[str, Any]:
+def console_open(vm: Optional[str] = None) -> Dict[str, Any]:
     _require_hyperv()
     try:
-        return _console().open()
+        return _console(vm).open()
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/console/close")
-def console_close() -> Dict[str, Any]:
-    return _console().close()
+def console_close(vm: Optional[str] = None) -> Dict[str, Any]:
+    return _console(vm).close()
 
 
 @app.get("/api/console/status")
-def console_status() -> Dict[str, Any]:
-    return _console().status()
+def console_status(vm: Optional[str] = None) -> Dict[str, Any]:
+    return _console(vm).status()
 
 
 @app.get("/api/console/frame")
-def console_frame() -> Response:
+def console_frame(vm: Optional[str] = None) -> Response:
     _require_hyperv()
     try:
-        data, frame_id = _console().frame()
+        data, frame_id = _console(vm).frame()
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return Response(
@@ -1168,10 +1198,10 @@ def console_frame() -> Response:
 
 
 @app.post("/api/console/input")
-def console_input(payload: Dict[str, Any]) -> Dict[str, Any]:
+def console_input(payload: Dict[str, Any], vm: Optional[str] = None) -> Dict[str, Any]:
     _require_hyperv()
     try:
-        return _console().input(payload)
+        return _console(vm).input(payload)
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
