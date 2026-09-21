@@ -1,0 +1,107 @@
+title: Discovery Command Chain (correlation base)
+name: sandbox_discovery_command_event
+status: experimental
+description: >
+    Base rule for the discovery-chain correlation: one execution of a classic
+    host/network recon command (tasklist, systeminfo, ipconfig, netstat,
+    whoami, reg query, wmic get, net user/group, ...). Never alerts on its
+    own -- it exists only to be counted by the correlation below.
+author: sandbox
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection_tools:
+        Image|endswith:
+            - '\tasklist.exe'
+            - '\systeminfo.exe'
+            - '\ipconfig.exe'
+            - '\netstat.exe'
+            - '\whoami.exe'
+            - '\qwinsta.exe'
+            - '\quser.exe'
+            - '\arp.exe'
+            - '\driverquery.exe'
+            - '\nltest.exe'
+            - '\hostname.exe'
+    selection_reg_query:
+        Image|endswith: '\reg.exe'
+        CommandLine|contains: ' query'
+    selection_wmic_get:
+        Image|endswith: '\wmic.exe'
+        CommandLine|contains: ' get'
+    selection_net:
+        Image|endswith:
+            - '\net.exe'
+            - '\net1.exe'
+        CommandLine|contains:
+            - ' user'
+            - ' group'
+            - ' localgroup'
+            - ' view'
+            - ' accounts'
+            - ' statistics'
+    condition: 1 of selection_*
+level: informational
+---
+title: Discovery Command Chain (Recon Burst)
+id: c0f1a2b3-6666-4a00-9c06-5a0dbea50b06
+status: experimental
+description: >
+    A single shell ran >= 2 discovery/recon commands within 60 seconds --
+    the classic post-compromise "where am I" burst (ART T1082/T1033/T1016
+    atomics, malware stage-1 fingerprinting). A lone recon command is NOT
+    scored (too common in admin tooling -- see the single-command FP trap
+    documented in docs/detection-gap-tracker.md); the temporal chain is the
+    signal. Grouped by ParentProcessGuid so all children of one script shell
+    count together.
+author: sandbox
+date: 2026/09/20
+tags:
+    - attack.discovery
+    - attack.t1082
+    - attack.t1057
+    - attack.t1033
+    - attack.t1016
+correlation:
+    type: event_count
+    rules:
+        - sandbox_discovery_command_event
+    group-by:
+        - ParentProcessGuid
+    timespan: 60s
+    condition:
+        gte: 2
+falsepositives:
+    - IT diagnostics/inventory scripts that batch several readouts; tolerated
+      at suspicious in a hostile-input sandbox (boundary tier), never enough
+      for malicious on its own
+level: medium
+---
+title: MachineGUID Fingerprinting via reg.exe Query
+id: c0f1a2b3-7777-4a00-9c07-5a0dbea50b07
+status: experimental
+description: >
+    reg.exe querying the MachineGUID value -- host fingerprinting used by
+    malware for victim ID / sandbox correlation (ART T1082 atomic). Legit
+    licensing/inventory software reads MachineGUID via API or WMI, not by
+    shelling out to reg.exe query.
+author: sandbox
+date: 2026/09/20
+tags:
+    - attack.discovery
+    - attack.t1082
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection_img:
+        Image|endswith: '\reg.exe'
+    selection_cmd:
+        CommandLine|contains|all:
+            - 'Cryptography'
+            - 'MachineGuid'
+    condition: all of selection_*
+falsepositives:
+    - Rare; legacy licensing scripts
+level: high

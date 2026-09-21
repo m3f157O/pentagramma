@@ -1,0 +1,27 @@
+title: Command Obfuscation via Negative-Offset Variable Slicing
+id: c0f1a2b3-dddd-4a00-9c0d-5a0dbea50b0d
+status: experimental
+description: >
+    Command line builds a string via negative-offset variable substring
+    expansion (e.g. %LOCALAPPDATA:~-3,1% -> "c" to assemble "cmd") -- a
+    cmd/batch obfuscation trick to evade naive command-line matching
+    (ART T1059.003 atomic). Negative-index slicing is rare in legitimate
+    batch code; positive offsets (%var:~0,3%) are deliberately NOT matched
+    (too common in installer scripts).
+author: sandbox
+date: 2026/09/20
+tags:
+    - attack.defense-evasion
+    - attack.execution
+    - attack.t1059.003
+    - attack.t1027
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection:
+        CommandLine|re: '[%!][A-Za-z_][A-Za-z0-9_]*:~-\d+,\d+[%!]'
+    condition: selection
+falsepositives:
+    - Exotic batch one-liners; rare
+level: high

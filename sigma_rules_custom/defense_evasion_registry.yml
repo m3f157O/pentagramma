@@ -1,0 +1,79 @@
+title: Prefetch Disabled via Registry
+id: c0f1a2b3-8888-4a00-9c08-5a0dbea50b08
+status: experimental
+description: >
+    EnablePrefetcher set to 0 -- disables execution forensics, a defense
+    evasion step (ART T1112 atomic). Essentially no modern legitimate
+    software disables Prefetch (the 2010-era "SSD optimizer" advice is long
+    dead); scored high so a single hit reaches suspicious.
+author: sandbox
+date: 2026/09/20
+tags:
+    - attack.defense-evasion
+    - attack.t1112
+logsource:
+    product: windows
+    category: registry_set
+detection:
+    selection_key:
+        TargetObject|endswith: 'PrefetchParameters\EnablePrefetcher'
+    selection_val:
+        Details|contains: '0x00000000'
+    condition: all of selection_*
+falsepositives:
+    - Ancient SSD-tweaker tools
+level: high
+---
+title: CredSSP AllowEncryptionOracle Weakened (Mitigation Bypass)
+id: c0f1a2b3-9999-4a00-9c09-5a0dbea50b09
+status: experimental
+description: >
+    CredSSP\Parameters\AllowEncryptionOracle set to 2 -- re-enables the
+    vulnerable CredSSP mode (CVE-2018-0886 mitigation bypass), seen in
+    Scarab ransomware defense-evasion batches (ART T1112 atomic) and in
+    lateral-movement prep.
+author: sandbox
+date: 2026/09/20
+tags:
+    - attack.defense-evasion
+    - attack.t1112
+logsource:
+    product: windows
+    category: registry_set
+detection:
+    selection_key:
+        TargetObject|endswith: 'CredSSP\Parameters\AllowEncryptionOracle'
+    selection_val:
+        Details|contains: '0x00000002'
+    condition: all of selection_*
+falsepositives:
+    - 2018-era RDP workaround scripts (long obsolete)
+level: high
+---
+title: FSUtil USN DeleteJournal
+id: c0f1a2b3-aaaa-4a00-9c0a-5a0dbea50b0a
+status: experimental
+description: >
+    fsutil usn deletejournal -- destroys the USN change journal to erase
+    forensic traces of file activity; ransomware precursor (ART T1070
+    atomic). Deliberately scoped to deletejournal only: other fsutil verbs
+    (behaviorquery, volume info) are benign admin usage.
+author: sandbox
+date: 2026/09/20
+tags:
+    - attack.defense-evasion
+    - attack.t1070
+logsource:
+    product: windows
+    category: process_creation
+detection:
+    selection_img:
+        Image|endswith: '\fsutil.exe'
+    selection_cmd:
+        CommandLine|contains|all:
+            - 'usn'
+            - 'deletejournal'
+    condition: all of selection_*
+falsepositives:
+    - Practically none; destructive maintenance only
+level: high

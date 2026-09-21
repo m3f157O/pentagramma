@@ -27,7 +27,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from orchestrator.config import get_config  # noqa: E402
-from scripts.detection_metrics import _report_head_identity  # noqa: E402
+from scripts.label_from_manifests import _report_identity_head  # noqa: E402
 
 MANIFEST = PROJECT_ROOT / "samples" / "atomic_redteam" / "manifest.json"
 BAND_ORDER = {"clean": 0, "suspicious": 1, "malicious": 2}
@@ -39,10 +39,7 @@ def latest_reports_by_filename(reports_dir: Path):
     for p in reports_dir.glob("*.json"):
         if p.name.endswith(".summary.json"):
             continue
-        ident = _report_head_identity(p)
-        if not ident:
-            continue
-        fn, ts = ident.get("filename"), ident.get("timestamp") or ""
+        _sha, ts, fn = _report_identity_head(p)
         if fn and (fn not in best or ts > best[fn][0]):
             best[fn] = (ts, p)
     return best
@@ -53,7 +50,14 @@ def technique_covered(report: dict, technique: str) -> bool:
     appears in the report's mitre_coverage."""
     cov = report.get("mitre_coverage") or {}
     seen = set()
-    for entry in cov.get("techniques") or cov.get("coverage") or []:
+    entries = cov.get("techniques") or cov.get("coverage")
+    if entries is None:
+        # Current schema: {event_type: {"count": N, "mitre": [{...}, ...]}, ...}
+        entries = []
+        for v in cov.values():
+            if isinstance(v, dict):
+                entries.extend(v.get("mitre") or [])
+    for entry in entries:
         tid = (entry.get("technique_id") or entry.get("id") or "") if isinstance(entry, dict) else str(entry)
         if tid:
             seen.add(tid)

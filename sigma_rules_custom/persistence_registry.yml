@@ -1,0 +1,48 @@
+title: TelemetryController Registry Key Persistence
+id: c0f1a2b3-bbbb-4a00-9c0b-5a0dbea50b0b
+status: experimental
+description: >
+    Write under HKLM\...\AppCompatFlags\TelemetryController\<key>\Command --
+    abuses the telemetry controller's command execution for persistence
+    (ART T1112 atomic). Only Windows itself maintains this hive; an
+    arbitrary Command value pointing at a payload is not legitimate.
+author: sandbox
+date: 2026/09/20
+tags:
+    - attack.persistence
+    - attack.defense-evasion
+    - attack.t1112
+logsource:
+    product: windows
+    category: registry_set
+detection:
+    selection:
+        TargetObject|contains: '\AppCompatFlags\TelemetryController\'
+    condition: selection
+falsepositives:
+    - Practically none
+level: high
+---
+title: Recycle Bin CLSID Shell Command Hijack
+id: c0f1a2b3-cccc-4a00-9c0c-5a0dbea50b0c
+status: experimental
+description: >
+    Write to the Recycle Bin CLSID ({645FF040-...}) shell\open\command --
+    hijacks what runs when the Recycle Bin is opened, a persistence /
+    execution hijack (ART T1547.001 atomic). No legitimate software rebinds
+    this verb.
+author: sandbox
+date: 2026/09/20
+tags:
+    - attack.persistence
+    - attack.t1547.001
+logsource:
+    product: windows
+    category: registry_set
+detection:
+    selection:
+        TargetObject|contains: '{645FF040-5081-101B-9F08-00AA002F954E}\shell'
+    condition: selection
+falsepositives:
+    - Practically none
+level: high
