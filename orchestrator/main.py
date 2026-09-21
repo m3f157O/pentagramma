@@ -855,6 +855,63 @@ def vm_provision_defender_on() -> Any:
         return JSONResponse(status_code=500, content={"status": "failed", "error": str(exc), "steps": steps})
 
 
+@app.post("/api/vm/provision-registry-tools")
+def vm_provision_registry_tools() -> Any:
+    """One-shot golden-image provisioning: remove the DisableRegistryTools
+    policy so reg.exe works in the guest. The policy neuters an entire class
+    of attacker behavior this sandbox exists to observe (confirmed 2026-09-21:
+    ART reg-add atomics for prefetch/TelemetryController/CredSSP/Recycle-Bin
+    all no-op'd in the guest; probe showed High-IL admin token + rc=1, i.e.
+    policy not privilege). See agent/windows/registry_tools_manager.py.
+
+    restore -> boot -> copy agent -> enable -> verify -> (only if verify
+    passes) re-capture the golden snapshot. No reboot needed: reg.exe
+    evaluates the policy at process launch. A removal that didn't take never
+    corrupts the golden image.
+    """
+    _require_hyperv()
+    cfg = _cfg()
+    agent_src = cfg.paths.get("agent_dir")
+    guest_agent_dir = cfg.telemetry.get("guest_agent_dir", "C:\\SandboxAgent")
+    steps: list = []
+
+    def record(name: str, result: Any) -> Any:
+        steps.append({"step": name, "result": result})
+        return result
+
+    try:
+        hv = HyperVManager(cfg)
+        record("restore_snapshot", hv.restore_snapshot())
+        record("start_vm", hv.start_vm())
+        record("copy_agent", hv.copy_agent(agent_source_dir=agent_src, destination_dir=guest_agent_dir))
+        record("status_before", hv.invoke_guest_python("registry_tools_manager.py", "status", agent_dir=guest_agent_dir))
+        record("enable", hv.invoke_guest_python("registry_tools_manager.py", "enable", agent_dir=guest_agent_dir))
+        verify = record("verify", hv.invoke_guest_python("registry_tools_manager.py", "verify", agent_dir=guest_agent_dir))
+
+        if str(verify.get("ExitCode")) != "0":
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "reg_exe_still_blocked",
+                    "detail": (
+                        "reg.exe still fails after removing DisableRegistryTools -- check the verify "
+                        "step output (another policy layer, WDAC, or LGPO re-applying). "
+                        "Golden snapshot was NOT modified."
+                    ),
+                    "steps": steps,
+                },
+            )
+
+        record("recapture_snapshot", hv.recapture_snapshot())
+        return {
+            "status": "provisioned",
+            "detail": "DisableRegistryTools removed; reg.exe works and is baked into the golden snapshot.",
+            "steps": steps,
+        }
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"status": "failed", "error": str(exc), "steps": steps})
+
+
 @app.post("/api/vm/provision-clean-archive")
 def vm_provision_clean_archive() -> Any:
     """Golden-image hygiene: empty Sysmon's deleted-file archive
