@@ -166,7 +166,7 @@ def analyze_file(file_path: str | Path, config: Dict[str, Any]) -> Dict[str, Any
 
     timeout = int(config.get("timeout_seconds", 180))
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return {"available": False, "reason": "timeout", "detail": f"capa exceeded {timeout}s"}
     except Exception as exc:

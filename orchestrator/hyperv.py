@@ -99,7 +99,10 @@ class HyperVManager:
                 args.append(f"-{key}")
                 args.append(str(value))
 
-        result = subprocess.run(args, capture_output=True, text=True, shell=False)
+        # errors="replace": child output may contain bytes undefined in the
+        # locale codepage (cp1252) which would otherwise kill the subprocess
+        # reader thread with UnicodeDecodeError.
+        result = subprocess.run(args, capture_output=True, text=True, shell=False, errors="replace")
         if result.returncode != 0:
             raise RuntimeError(f"PowerShell command '{command}' failed: {result.stderr}")
 

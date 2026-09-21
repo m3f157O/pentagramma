@@ -512,6 +512,7 @@ def _run_ps_stage(job_id: str, args: List[str], timeout: int) -> "tuple[int, str
         cwd=str(PROJECT_ROOT),
         capture_output=True,
         text=True,
+        errors="replace",
         timeout=timeout,
     )
     return proc.returncode, ((proc.stdout or "") + (proc.stderr or ""))[-4000:]

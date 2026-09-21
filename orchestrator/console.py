@@ -267,6 +267,7 @@ class ConsoleManager:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            errors="replace",
             bufsize=1,
         )
         self._helper_reader = threading.Thread(target=self._read_acks, daemon=True)

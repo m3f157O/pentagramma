@@ -55,7 +55,26 @@ function Invoke-AnalysisCommand {
         }
         return (& $sb @al)
     }
-    return (Invoke-Command @InvokeArgs)
+
+    # VM mode: PowerShell Direct throws transient transport errors while the
+    # guest is still booting after a snapshot restore -- PSSessionStateBroken
+    # ("socket di Hyper-V ... terminato") and InvalidVMState. Start-SandboxVM
+    # only waits for an IP, which appears well before the PSDirect service is
+    # ready, so the first guest op of a job (Copy-Agent) can race the boot and
+    # fail the whole job. Retry transport-class errors; rethrow real
+    # scriptblock failures immediately.
+    $maxAttempts = 24  # 24 x 10s = 4 min worst case (observed gap: ~2-3 min)
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            return (Invoke-Command @InvokeArgs)
+        } catch {
+            $fqid = [string]$_.FullyQualifiedErrorId
+            $transient = $fqid -match 'PSSessionStateBroken|InvalidVMState' -or
+                         $_.Exception -is [System.Management.Automation.Remoting.PSRemotingTransportException]
+            if (-not $transient -or $attempt -ge $maxAttempts) { throw }
+            Start-Sleep -Seconds 10
+        }
+    }
 }
 
 function Copy-AnalysisFileToTarget {

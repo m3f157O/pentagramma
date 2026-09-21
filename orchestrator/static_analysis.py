@@ -735,6 +735,7 @@ class StaticAnalyzer:
                 ],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=30,
             )
             status = proc.stdout.strip()
