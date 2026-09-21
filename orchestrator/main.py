@@ -912,6 +912,47 @@ def vm_provision_registry_tools() -> Any:
         return JSONResponse(status_code=500, content={"status": "failed", "error": str(exc), "steps": steps})
 
 
+@app.post("/api/vm/provision-off-snapshot")
+def vm_provision_off_snapshot() -> Any:
+    """One-time migration to a disk-only golden snapshot: restore -> boot ->
+    settle (boot storm + autologon) -> clean guest shutdown -> recapture while
+    OFF.
+
+    History: SANDBOX_READY had been a saved-state checkpoint since
+    2026-09-02 (Ensure-Snapshot's Stop-VM -Save / running Recapture), so every
+    run resumed with a frozen clock that oscillated for ~1 min -- the root of
+    the 2026-09-21 stale-timestamp telemetry chaos. A checkpoint of an OFF VM
+    is disk-only: restores cold-boot with the host RTC, killing the entire
+    class. Recapture-Snapshot now always shuts down first, so this endpoint
+    only needs to produce a clean, settled guest and call it.
+    """
+    steps: list = []
+
+    def record(name: str, result: Any) -> Any:
+        steps.append({"step": name, "result": result})
+        return result
+
+    _require_hyperv()
+    try:
+        import time as _time
+
+        hv = HyperVManager(_cfg())
+        record("restore_snapshot", hv.restore_snapshot())
+        record("start_vm", hv.start_vm())
+        # Let the boot storm (post-boot service/registry churn) and autologon
+        # settle so the captured image is quiescent, then recapture -- which
+        # now shuts the guest down cleanly and captures disk-only.
+        record("settle_seconds", _time.sleep(90) or 90)
+        record("recapture_snapshot", hv.recapture_snapshot())
+        return {
+            "status": "provisioned",
+            "detail": "Golden snapshot re-captured from a cleanly shut-down VM (disk-only; restores now cold-boot with the host clock).",
+            "steps": steps,
+        }
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"status": "failed", "error": str(exc), "steps": steps})
+
+
 @app.post("/api/vm/provision-clean-archive")
 def vm_provision_clean_archive() -> Any:
     """Golden-image hygiene: empty Sysmon's deleted-file archive

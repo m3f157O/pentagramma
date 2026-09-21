@@ -34,6 +34,17 @@
 - Tests: 26/26 suite files + 25 pytest tooling tests + 4 readiness tests;
   corpus metrics gate green (recall 1.000, FPR 0.000).
 
+## Done 2026-09-21 EVE (committed)
+- **Golden snapshot migrated to disk-only** (`provision-off-snapshot`):
+  report-history forensics proved SANDBOX_READY had been a saved-state
+  checkpoint since 2026-09-02 (frozen clock + growing staleness every run).
+  `Ensure-Snapshot` no longer `Stop-VM -Save`s; `Recapture-Snapshot` now
+  shuts the guest down cleanly before checkpointing. All runs cold-boot
+  with the host clock — the entire stale-timestamp class is dead at the
+  root. Validated: guid suspicious/15, canaries 0/8, COLD-BOOT on all
+  reports, ~240s/run (no slower than resume era).
+- Blog drafts 21 (log wrap) + 22 (self-flagging instrumentation) in `blog/`.
+
 ## Done 2026-09-21 (all committed)
 - **ART detonation batch + coverage audit** (`0dd49b5`): 55/55 atomics
   detonated; verdict recall 36 → 40/55 stored (42/55 incl. replay), TTP 37/55.

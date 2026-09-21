@@ -185,7 +185,11 @@ function Ensure-SandboxSnapshot {
     }
 
     if ($vm.State -ne "Off") {
-        Stop-VM -Name $VMName -Save -Force
+        # NEVER -Save: a checkpoint over a saved-state VM makes every restore
+        # a RESUME with a frozen clock (the 2026-09-02 incident: 19 days of
+        # stale-clock oscillation, telemetry filtered/wrapped as a result).
+        # The golden snapshot must be disk-only -- turn the VM off instead.
+        Stop-VM -Name $VMName -Force
     }
 
     $newSnapshot = Checkpoint-VM -Name $VMName -SnapshotName $SnapshotName -PassThru
@@ -2316,9 +2320,11 @@ function Restart-SandboxGuest {
 function Recapture-SandboxSnapshot {
     <#
     .SYNOPSIS
-        Replace the golden snapshot in place with the VM's current (running,
-        saved) state -- new-then-swap so a failure can never leave the VM with
-        no snapshot.
+        Replace the golden snapshot in place with the VM's current state --
+        new-then-swap so a failure can never leave the VM with no snapshot.
+        The guest is shut down cleanly first: the golden snapshot is ALWAYS
+        disk-only (a checkpoint of a running/saved VM freezes the clock at
+        capture time -- the 2026-09-02 incident).
     #>
     [CmdletBinding()]
     param(
@@ -2332,10 +2338,22 @@ function Recapture-SandboxSnapshot {
         throw "Snapshot '$SnapshotName' does not exist; refusing to recapture (create it with Ensure-Snapshot first)."
     }
 
-    # Save running state so the checkpoint captures the autologger session in
-    # memory (it only exists after a boot).
+    # Shut the guest down CLEANLY and capture disk-only. History: a checkpoint
+    # over a saved/running VM freezes the clock at capture time (2026-09-02
+    # incident -- 19 days of resume-with-stale-clock before it was found).
+    # Boot autologgers (ETW-Ti) start at boot by design, so a cold boot loses
+    # nothing; a graceful shutdown also flushes logs/services deterministically.
     $vm = Get-VM -Name $VMName
-    if ($vm.State -ne "Off") { Stop-VM -Name $VMName -Save -Force }
+    if ($vm.State -ne "Off") {
+        Stop-VM -Name $VMName -ErrorAction SilentlyContinue  # graceful via Integration Services
+        $offTimer = [Diagnostics.Stopwatch]::StartNew()
+        while ((Get-VM -Name $VMName).State -ne "Off" -and $offTimer.Elapsed.TotalSeconds -lt 180) {
+            Start-Sleep -Seconds 3
+        }
+        if ((Get-VM -Name $VMName).State -ne "Off") {
+            Stop-VM -Name $VMName -Force  # fallback: hard turn-off
+        }
+    }
 
     $temp = "$SnapshotName" + "-PROVISION"
     $stale = Get-VMSnapshot -VMName $VMName -Name $temp -ErrorAction SilentlyContinue
