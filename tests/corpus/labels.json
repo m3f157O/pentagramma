@@ -1343,6 +1343,38 @@
       "label": "benign",
       "family": "goodware",
       "note": "real goodware: ripgrep (unsigned, real-world OSS)"
+    },
+    {
+      "match": {
+        "filename": "7za.exe"
+      },
+      "label": "benign",
+      "family": "goodware",
+      "note": "real goodware: 7-Zip standalone console (unsigned, real-world OSS)"
+    },
+    {
+      "match": {
+        "filename": "curl.exe"
+      },
+      "label": "benign",
+      "family": "goodware",
+      "note": "real goodware: Microsoft-signed curl.exe from System32"
+    },
+    {
+      "match": {
+        "filename": "plink.exe"
+      },
+      "label": "benign",
+      "family": "goodware",
+      "note": "real goodware: PuTTY plink (signed Simon Tatham)"
+    },
+    {
+      "match": {
+        "filename": "rg.exe"
+      },
+      "label": "benign",
+      "family": "goodware",
+      "note": "real goodware: ripgrep (unsigned, real-world OSS)"
     }
   ]
 }

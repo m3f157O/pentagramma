@@ -1141,7 +1141,7 @@ def analyze_sample(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
     finally:
-        jobs.release()
+        jobs.release(job_id)
 
     return report
 

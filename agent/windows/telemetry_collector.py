@@ -78,6 +78,18 @@ def _write_baseline(sources: List[str]) -> None:
         "baseline_time": _utc_now_iso(),
         "created": _utc_now_iso(),
     }
+    if "sysmon" in sources:
+        # Clock-immune collection bound: the guest resumes from a saved-state
+        # snapshot with a stale clock that oscillates for ~1 min, so events
+        # generated in a stale phase carry stale TimeCreated and a time-based
+        # baseline silently drops them (confirmed live 2026-09-21: the
+        # sample's whole process chain missing from 3/3 reports).
+        # EventRecordID is monotonic regardless of the wall clock. Falls back
+        # to the time baseline when the id can't be read.
+        try:
+            data["sysmon_record_id"] = SysmonParser().newest_record_id()
+        except Exception:
+            data["sysmon_record_id"] = None
     BASELINE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
@@ -109,6 +121,10 @@ class TelemetryCollector:
             SysmonManager().ensure_running()
             print("[telemetry] updating Sysmon configuration")
             SysmonManager().update_config()
+            # Grow the channel BEFORE the run starts: at the 64MB default a
+            # full analysis (70-90MB of events) wraps mid-run and the
+            # sample's launch chain is overwritten before collection.
+            SysmonManager().set_log_size()
             self._clear_log("Microsoft-Windows-Sysmon/Operational", "Sysmon")
 
         if "etw_ti" in self.sources:
@@ -298,7 +314,13 @@ class TelemetryCollector:
         all_events: List[Dict] = []
 
         if "sysmon" in self.sources:
-            self._collect_source("Sysmon", lambda: SysmonParser().query_events(since_iso=since), all_events)
+            record_id = baseline.get("sysmon_record_id")
+            if record_id is not None:
+                self._collect_source(
+                    "Sysmon", lambda: SysmonParser().query_events(since_record_id=record_id), all_events
+                )
+            else:
+                self._collect_source("Sysmon", lambda: SysmonParser().query_events(since_iso=since), all_events)
 
         if "etw_ti" in self.sources:
             self._collect_source("ETW-Ti", lambda: EtwTiCollector().collect(since_iso=since), all_events)

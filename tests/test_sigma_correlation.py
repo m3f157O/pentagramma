@@ -80,8 +80,15 @@ def main() -> None:
     assert not _fired(e.evaluate([no_target]), ETWTI_ID), "no target process -> no fire"
     print("PASS: ETW-TI injection rule fires cross-process only (|fieldref TargetProcessId vs CallingProcessId)")
 
-    # --- Phase 3: event_count correlation rule ---
-    assert len(e._correlations) == 1 and e.correlation_rules_skipped == 0, "correlation rule should be loaded, not skipped"
+    # --- Phase 3: event_count correlation rules ---
+    # TWO correlations live in sigma_rules_custom: the mass-file-modification
+    # rule (CORR_ID, exercised below) and the discovery-recon burst rule added
+    # 2026-09-20 (discovery_recon.yml). Both must LOAD (0 skipped); only the
+    # former is exercised here.
+    assert len(e._correlations) == 2 and e.correlation_rules_skipped == 0, (
+        f"both correlation rules should load, not be skipped (loaded={len(e._correlations)}, "
+        f"skipped={e.correlation_rules_skipped})"
+    )
     t0 = datetime(2026, 7, 3, 12, 0, 0)
 
     burst = _file_events(1000, 25, t0, 0.1)  # 25 file events in ~2.5s

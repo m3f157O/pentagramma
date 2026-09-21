@@ -217,12 +217,49 @@ def _tooling_pids(telemetry_events: List[Dict[str, Any]]) -> set:
     return pids
 
 
+def _monitor_injection_markers(telemetry_events: List[Dict[str, Any]]) -> "tuple[Optional[int], set]":
+    """(trace_root_pid, placed_target_pids) -- the guardian/apitrace view of the
+    monitor's own injections, independent of Sysmon ProcessCreate visibility.
+
+    Needed because _tooling_pids() breaks when the loader's ProcessCreate is
+    missing from telemetry: after a snapshot revert the guest clock resumes at
+    the snapshot's save time and only re-syncs seconds later, so the earliest
+    events (the loader + sample launch themselves) carry stale timestamps and
+    can fall outside the since-baseline collection window (confirmed live
+    2026-09-21: gw_real_rg.exe scored malicious/45 -- the loader's own
+    injection chain had no ProcessCreate to be attributed by).
+
+    Two independent markers, both emitted per run regardless of the clock:
+      - the apitrace trace ROOT (first ``__monitor_attached__``) is always the
+        monitor LOADER when behavioral tracing is on -- the injector itself;
+      - every ``GuardianInjectionPlaced`` TargetProcessId is a pid the sandbox
+        placed a monitor into (the loader and each followed child).
+    A behavioral injection alert actor==trace-root AND target==placed is by
+    construction our own instrumentation, never sample behavior."""
+    trace_root: Optional[int] = None
+    placed: set = set()
+    for event in telemetry_events:
+        data = event.get("data") or {}
+        if (event.get("event_type") or event.get("EventType")) == "GuardianInjectionPlaced":
+            try:
+                placed.add(int(data.get("TargetProcessId")))
+            except (TypeError, ValueError):
+                continue
+        elif event.get("source") == "apitrace" and data.get("Api") == "__monitor_attached__" and trace_root is None:
+            try:
+                trace_root = int(data.get("ProcessId"))
+            except (TypeError, ValueError):
+                continue
+    return trace_root, placed
+
+
 def _suppress_monitor_injection_artifacts(
     alerts: List[Dict[str, Any]],
     telemetry_events: List[Dict[str, Any]],
     execution_info: Optional[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     tooling_pids = _tooling_pids(telemetry_events)
+    trace_root, placed_targets = _monitor_injection_markers(telemetry_events)
     vas = _tooling_loadlibrary_vas(telemetry_events)
     # (SourcePid, TargetPid) pairs of the monitor's child-following EID 8s,
     # used to catch the sibling EID 10 (process open) of the same injection.
@@ -256,15 +293,29 @@ def _suppress_monitor_injection_artifacts(
         if actor and _TOOLING_IMAGE_DIR in actor:
             # D. action performed BY a sandbox tooling binary (loader -> sample)
             reason = "tooling: monitor loader action on sample"
-        elif alert.get("source") == "apitrace" and tooling_pids:
+        elif alert.get("source") == "apitrace" and (tooling_pids or (trace_root is not None and placed_targets)):
             # D. behavioral signature synthesized from the loader's own
             #    injection API calls
             try:
                 _pid = int(data.get("ProcessId"))
             except (TypeError, ValueError):
                 _pid = None
+            try:
+                _tgt = int(data.get("TargetProcessId"))
+            except (TypeError, ValueError):
+                _tgt = None
             if _pid is not None and _pid in tooling_pids:
                 reason = "tooling: monitor loader injection (apitrace)"
+            elif (
+                _pid is not None
+                and _pid == trace_root
+                and _tgt is not None
+                and _tgt in placed_targets
+            ):
+                # Same class, identified via guardian/apitrace markers when
+                # the loader's ProcessCreate never made it into telemetry
+                # (guest-clock window cut -- see _monitor_injection_markers).
+                reason = "tooling: monitor loader injection (guardian-marked)"
         elif alert.get("event_type") == "ProcessAccess" and tooling_pairs:
             # D. EID 10 sibling of a tooling EID 8 child-following injection
             try:

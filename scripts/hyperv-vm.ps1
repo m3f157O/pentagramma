@@ -2219,6 +2219,52 @@ function Invoke-GuestPython {
     return Invoke-AnalysisCommand $invokeArgs
 }
 
+function Sync-GuestTime {
+    <#
+    .SYNOPSIS
+        Set the guest clock from the host's UTC time. After a snapshot revert
+        the guest clock resumes at the snapshot's save time and only re-syncs
+        (Hyper-V time integration / w32time) several seconds into the run, so
+        the earliest events -- the loader's and the sample's own launch --
+        carry stale timestamps and can fall outside the since-baseline
+        telemetry collection window (confirmed live 2026-09-21: both
+        ProcessCreate events missing from a report, which then mis-attributed
+        the monitor loader's own injection as sample behavior). Runs right
+        after start_vm, before telemetry_init records its baseline.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string]$VMName,
+        [Parameter(Mandatory = $true)][string]$HostTimeUtc,
+        [Parameter(Mandatory = $false)][string]$CredentialUsername,
+        [Parameter(Mandatory = $false)][string]$CredentialPassword
+    )
+    Assert-VMExists -VMName $VMName | Out-Null
+    $cred = New-VmCredential -Username $CredentialUsername -Password $CredentialPassword
+    $scriptBlock = {
+        param($hostTimeUtc)
+        $before = (Get-Date).ToUniversalTime().ToString("o")
+        $target = [DateTime]::Parse($hostTimeUtc, $null, [System.Globalization.DateTimeStyles]::RoundtripKind).ToLocalTime()
+        # The clock can be yanked BACK to the snapshot's stale save time after
+        # a successful Set-Date (w32time / Integration Services tug-of-war
+        # while resuming from a saved-state snapshot, confirmed live
+        # 2026-09-21: Set-Date succeeded, sample still launched stale).
+        # Re-assert until the clock stays within 15s of the target.
+        $stable = $false
+        for ($i = 0; $i -lt 5 -and -not $stable; $i++) {
+            Set-Date -Date $target
+            Start-Sleep -Seconds 3
+            $drift = [Math]::Abs(((Get-Date) - $target).TotalSeconds)
+            $stable = ($drift -le 15)
+            if (-not $stable) { Start-Sleep -Seconds 5 }
+        }
+        return @{ BeforeUtc = $before; AfterUtc = (Get-Date).ToUniversalTime().ToString("o"); Stable = $stable }
+    }
+    $invokeArgs = @{ VMName = $VMName; ScriptBlock = $scriptBlock; ArgumentList = @($HostTimeUtc) }
+    if ($cred) { $invokeArgs['Credential'] = $cred }
+    return Invoke-AnalysisCommand $invokeArgs
+}
+
 function Restart-SandboxGuest {
     <#
     .SYNOPSIS
@@ -2804,6 +2850,7 @@ if ($args.Count -gt 0) {
         "Copy-SandboxArchive"     { Copy-SandboxArchiveFromVM @remainingArgs | ConvertTo-Json -Depth 5 }
         "Clear-SandboxArchive"    { Clear-SandboxArchive @remainingArgs | ConvertTo-Json -Depth 5 }
         "Invoke-GuestPython"      { Invoke-GuestPython @remainingArgs | ConvertTo-Json -Depth 5 }
+        "Sync-GuestTime"          { Sync-GuestTime @remainingArgs | ConvertTo-Json }
         "Restart-Guest"           { Restart-SandboxGuest @remainingArgs | ConvertTo-Json }
         "Recapture-Snapshot"      { Recapture-SandboxSnapshot @remainingArgs | ConvertTo-Json }
         "Console-InputServer-Start" { Invoke-ConsoleInputServerStart @remainingArgs | ConvertTo-Json }

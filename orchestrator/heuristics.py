@@ -418,6 +418,19 @@ def detect_defender_threats(events: List[Dict[str, Any]],
             path_str = str(data.get("Path") or "").lower()
             if "sandboxagent" in path_str:
                 continue
+            if not path_str:
+                # 2026-09-21: path-less MpTest detections are our readiness
+                # probe by construction (it fires the test string via a
+                # command line, never a file). The timestamp comparison below
+                # is NOT a reliable substitute: the guest clock oscillates
+                # after snapshot resume, so the sample's ProcessCreate can be
+                # stamped EARLIER than the probe's detection -- making our
+                # own probe look like in-sample behavior (+25 on a benign
+                # atomic, live on the MachineGUID ART run). A sample printing
+                # the test string produces a detection WITH a path (its own
+                # script, e.g. C:\Sandbox\amsi_detection.ps1) and still
+                # scores via the branch below.
+                continue
             det = _parse_sysmon_time(data.get("Detection Time") or event.get("timestamp"))
             if sample_start is None or det is None or det < sample_start:
                 continue  # our own AMSI readiness probe (see docstring)

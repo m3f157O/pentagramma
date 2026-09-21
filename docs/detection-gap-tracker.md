@@ -351,3 +351,58 @@ powershell_remotesigned.
    raw access, ransom-note filenames.
 3. Re-run the validator after adding rules; target ≥90% dataset coverage
    excluding group A.
+
+## Atomic Red Team campaign gaps (2026-09-21)
+
+Outcome of the 55-sample ART batch (`scripts/verify_atomic_coverage.py`):
+**40/55 stored verdicts ≥ expected** (42/55 effective — the T1082 pair flips on
+re-detonation, replay-confirmed), 37/55 with expected technique in MITRE
+coverage, 0 no-report. Corpus gate after all fixes: precision 1.000, recall
+1.000, FPR 0.000. Below are the remaining misses with triage classification.
+
+### Class 1 — score-8 single-medium-rule (fixable: weight bump or CAPE scoring)
+
+One medium Sigma hit scores 8; suspicious starts at 10. Deliberate scoring
+policy (one medium can never reach suspicious) — fix candidates are
+medium→high bumps for high-confidence rules, or the CAPE-scoring experiment.
+
+| atomic | technique | verdict | candidate fix |
+|---|---|---|---|
+| Obfuscated PowerShell via Character Array (art_T1027_obfuscated_powershell_command_via_character_arra.ps1) | T1027 | clean/8 | CAPE scoring |
+| WMI Execute Local Process (art_T1047_wmi_execute_local_process.bat) | T1047 | clean/8 | bump `wmic process call create` rule medium→high |
+| PowerShell Cmdlet Scheduled Task (art_T1053_005_powershell_cmdlet_scheduled_task.ps1) | T1053.005 | clean/8 | CAPE scoring |
+| Lolbas replace.exe UNC copy (art_T1105_lolbas_replace_exe_use_to_copy_unc_file.bat) | T1105 | clean/8 | bump `replace.exe UNC copy` rule medium→high |
+| Change PowerShell Execution Policy to Bypass (art_T1112_change_powershell_execution_policy_to_bypass.ps1) | T1112 | clean/8 | CAPE scoring |
+| Rundll32 via FileProtocolHandler (art_T1218_011_rundll32_execute_command_via_fileprotocolhandler.bat) | T1218.011 | clean/8 | CAPE scoring |
+| Wlrmdr LOLBin (art_T1218_system_binary_proxy_execution_wlrmdr_lolbin.ps1) | T1218 | clean/8 | CAPE scoring |
+| Modify Service to Run Arbitrary Binary (art_T1543_003_modify_service_to_run_arbitrary_binary_powershel.ps1) | T1543.003 | clean/8 | CAPE scoring |
+
+### Class 2 — fixed, awaiting re-detonation (stored reports stale)
+
+| atomic | technique | stored | replay after fixes |
+|---|---|---|---|
+| System Information Discovery (art_T1082_system_information_discovery.bat) | T1082 | clean/8 | suspicious/16 (recon-chain correlation stacks) |
+| Windows MachineGUID Discovery (art_T1082_windows_machineguid_discovery.bat) | T1082 | clean/0 | suspicious/15 (MachineGUID rule, high) |
+
+### Class 3 — environment-truthful (won't fix; scoring them = FP trap)
+
+| atomic | technique | verdict | reason |
+|---|---|---|---|
+| Process Discovery - tasklist (art_T1057_process_discovery_tasklist.bat) | T1057 | clean/0 | bare `tasklist` is normal admin activity; scored only inside recon-chain correlation |
+| Enable Proxy Settings (art_T1112_enable_proxy_settings.bat) | T1112 | clean/0 | proxy-enable alone is legitimate enterprise config |
+| Add persistence via Recycle Bin (art_T1547_001_add_persistance_via_recycle_bin.bat) | T1547.001 | clean/0 | HKCR CLSID `shell\open\command` key is TrustedInstaller-owned; elevated sample cannot write it — environment-truthful failure, rule kept for writable variants |
+
+### Class 4 — telemetry-structural (cannot be fixed via EID 1)
+
+| atomic | technique | verdict | reason |
+|---|---|---|---|
+| Suspicious Execution via cmd var-slice (art_T1059_003_suspicious_execution_via_windows_command_shell.bat) | T1059.003 | clean/0 | `%VAR:~-3,1%` slicing is expanded by cmd.exe before any child ProcessCreate exists — the obfuscated text never appears in telemetry. Rule kept for literal/unexpanded cases |
+| Rundll32 VBScript via ordinal (art_T1218_011_rundll32_execute_vbscript_command_using_ordinal_.bat) | T1218.011 | clean/0 | needs review — likely same class or a missing community rule at min_level medium |
+
+### TTP-coverage-only misses (verdict OK, technique not in MITRE matrix)
+
+12 atomics alert fine but their expected technique isn't emitted in
+`mitre_coverage` — a mapping-layer gap, not a scoring gap: T1016 ×2, T1033 ×2,
+T1047 ×2, T1053.005 ×2, T1083, T1105, T1119, T1543.003, T1560. Candidate:
+extend `orchestrator/mitre_mapping.py` for the discovery/lateral techniques
+already fired on by the new custom rules.

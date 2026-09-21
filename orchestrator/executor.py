@@ -608,6 +608,28 @@ class SandboxExecutor:
             if not vm_ip:
                 raise RuntimeError("VM started but did not acquire an IP address")
 
+            # 3b. Guest clock sync -- DISABLED 2026-09-21 (regression).
+            # Set-Date in a guest that just resumed from a saved-state
+            # snapshot creates a violent clock discontinuity while Sysmon and
+            # the event-log pipeline are mid-stream; the events for processes
+            # launched in that window (always the sample chain) are lost at
+            # GENERATION (missing from the guest log itself, proven via probe:
+            # stale-stamped events never reach the log, collection-layer fixes
+            # cannot recover them). It also likely caused the monitor-ready
+            # 258 timeout (clock jump mid-wait). Before this step existed, the
+            # stale clock was *consistent* (baseline + events both stale) and
+            # nothing was lost; the record-ID collection baseline now makes
+            # stale timestamps harmless for completeness WITHOUT touching the
+            # clock. Leave disabled; natural Integration-Services sync handles
+            # timeliness. Config escape hatch only.
+            guest_time_sync_info: Optional[Dict[str, Any]] = None
+            if self.config.analysis.get("sync_guest_time_enabled", False):
+                _step("sync_guest_time")
+                try:
+                    guest_time_sync_info = self.hv.sync_guest_time()
+                except Exception as exc:
+                    guest_time_sync_info = {"error": str(exc)}
+
             # 4. Copy telemetry agent into VM
             _step("copy_agent")
             self.hv.copy_agent(agent_source_dir=agent_dir_host, destination_dir=guest_agent_dir)
@@ -783,6 +805,29 @@ class SandboxExecutor:
                 except Exception as exc:
                     guardian_start_error = f"Failed to start guardian agent: {exc}"
 
+            # 7c. Sysmon EID-1 readiness gate. Confirmed live 2026-09-21:
+            # a run can launch the sample inside a transient Sysmon blind
+            # window and silently lose the sample's whole process chain from
+            # telemetry (the MachineGUID atomic lost loader/cmd/reg
+            # ProcessCreate events 3/3 runs while the apitrace proved the
+            # processes existed). Probe process-create flow right before
+            # launch; never launch blind. Non-fatal -- recorded either way so
+            # a degraded run is visible instead of a silent clean/0.
+            sysmon_readiness = None
+            sr_timeout = self.config.analysis.get("sysmon_readiness_timeout_seconds", 30)
+            if sr_timeout and sr_timeout > 0 and not self.is_local:
+                _step("sysmon_ready")
+                try:
+                    sr_result = self.hv.invoke_guest_python(
+                        "sysmon_manager.py", f"wait-ready {int(sr_timeout)}", agent_dir=guest_agent_dir
+                    )
+                    sysmon_readiness = {
+                        "ready": sr_result.get("ExitCode") == 0,
+                        "detail": (sr_result.get("Output") or "").strip()[-400:],
+                    }
+                except Exception as exc:
+                    sysmon_readiness = {"ready": None, "detail": f"readiness check failed: {exc}"}
+
             # 8. Execute sample
             _step("execute_sample")
             if interactive and self.is_local:
@@ -844,6 +889,13 @@ class SandboxExecutor:
             # execution record so the report shows whether AMSI was armed.
             if defender_readiness is not None:
                 execution_info["defender_readiness"] = defender_readiness
+            if sysmon_readiness is not None:
+                execution_info["sysmon_readiness"] = sysmon_readiness
+            if guest_time_sync_info is not None:
+                # Surfaced here (not at the call site): execute_sample returns
+                # a FRESH execution_info dict, so anything stored on the old
+                # one before step 8 would be silently dropped.
+                execution_info["guest_time_sync"] = guest_time_sync_info
             if apitrace_start_error is not None:
                 execution_info["apitrace_start_error"] = apitrace_start_error
             if guardian_start_error is not None:

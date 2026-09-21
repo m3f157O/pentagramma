@@ -28,6 +28,7 @@ rule suspicious_cmd_commands
     meta:
         description = "Detects suspicious cmd.exe patterns"
         author = "sandbox"
+        note = "2026-09-21: PE files now need 2+ strings -- real-world goodware embeds these literals legitimately (ripgrep contains 'cmd.exe /e:ON /v:OFF /d /c' and scored +15 static on 2026-09-21). Script files (non-PE) still match on any single string. Backup of previous version: backups/yara-20260921/."
     strings:
         $a = /cmd\.exe.{0,100}(\/c|\/k)/ nocase
         $b = /rundll32\.exe\s+[^\s]+,#\d+/ nocase
@@ -35,7 +36,7 @@ rule suspicious_cmd_commands
         $d = /mshta\.exe\s+(http|vbscript|javascript)/ nocase
         $e = /certutil\.exe.{0,80}(decode|urlcache|encode)/ nocase
     condition:
-        any of them
+        (not uint16(0) == 0x5A4D and any of them) or (uint16(0) == 0x5A4D and 2 of them)
 }
 
 rule suspicious_urls

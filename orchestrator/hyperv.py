@@ -8,6 +8,7 @@ never creates or deletes VMs.
 import json
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -32,6 +33,15 @@ LOCAL_STATUS_TTL_SECONDS = 30.0
 # load + Hyper-V module + Get-VM) and the fleet page polls every 10s.
 _FLEET_VMS_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
 FLEET_VMS_TTL_SECONDS = 15.0
+
+# Wall-clock guard for the powershell.exe child itself. _run_ps used to block
+# forever when the helper wedged (e.g. PSDirect transport dead against a dead
+# VM), which parked the jobs.py single-flight slot until an orchestrator
+# restart. Commands that take a caller-supplied TimeoutSeconds (Execute-Sample
+# up to 600s, Restart-Guest 300s, Start-VM 240s) get that plus a margin for
+# script load / transport setup; everything else gets the default.
+PS_DEFAULT_TIMEOUT_SECONDS = 900
+PS_TIMEOUT_MARGIN_SECONDS = 300
 
 
 class HyperVManager:
@@ -75,6 +85,7 @@ class HyperVManager:
             "Copy-SandboxArchive",
             "Clear-SandboxArchive",
             "Invoke-GuestPython",
+            "Sync-GuestTime",
             "Get-GuestHealth",
             "Get-TelemetryTail",
             "Restart-Guest",
@@ -99,10 +110,22 @@ class HyperVManager:
                 args.append(f"-{key}")
                 args.append(str(value))
 
+        ps_timeout = PS_DEFAULT_TIMEOUT_SECONDS
+        base_timeout = params.get("TimeoutSeconds")
+        if isinstance(base_timeout, (int, float)) and base_timeout > 0:
+            ps_timeout = int(base_timeout) + PS_TIMEOUT_MARGIN_SECONDS
+
         # errors="replace": child output may contain bytes undefined in the
         # locale codepage (cp1252) which would otherwise kill the subprocess
         # reader thread with UnicodeDecodeError.
-        result = subprocess.run(args, capture_output=True, text=True, shell=False, errors="replace")
+        try:
+            result = subprocess.run(
+                args, capture_output=True, text=True, shell=False, errors="replace", timeout=ps_timeout
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"PowerShell command '{command}' timed out after {ps_timeout}s (VM wedged?)"
+            ) from exc
         if result.returncode != 0:
             raise RuntimeError(f"PowerShell command '{command}' failed: {result.stderr}")
 
@@ -151,6 +174,13 @@ class HyperVManager:
     def restart_guest(self, timeout_seconds: int = 300) -> Dict[str, Any]:
         """Reboot the guest OS and wait until it responds again."""
         return self._run_ps("Restart-Guest", TimeoutSeconds=timeout_seconds)
+
+    def sync_guest_time(self) -> Dict[str, Any]:
+        """Set the guest clock from host UTC. After a snapshot revert the guest
+        resumes at the snapshot's save time and only re-syncs seconds later,
+        so early events (loader/sample launch) carry stale timestamps and can
+        fall outside the telemetry window (confirmed live 2026-09-21)."""
+        return self._run_ps("Sync-GuestTime", HostTimeUtc=datetime.now(timezone.utc).isoformat())
 
     def recapture_snapshot(self) -> Dict[str, Any]:
         """Replace the golden snapshot in place with the VM's current state
@@ -625,6 +655,10 @@ class LocalTransport(HyperVManager):
 
     def restart_guest(self, timeout_seconds: int = 300) -> Dict[str, Any]:
         return self._skipped("Restart-Guest")
+
+    def sync_guest_time(self) -> Dict[str, Any]:
+        # Local mode: the "guest" IS this machine -- never Set-Date the host.
+        return self._skipped("Sync-GuestTime")
 
     def start_vm(self, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
         # The "guest" is already running -- it's this machine. The IP is a

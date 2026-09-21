@@ -24,6 +24,7 @@ import logging
 import re
 import subprocess
 import threading
+import time
 import traceback
 import uuid
 from collections import OrderedDict
@@ -71,6 +72,17 @@ _lock = threading.Lock()
 _jobs: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
 _active_job_id: Optional[str] = None
 
+# Stale-job watchdog: _run_ps now has its own subprocess timeout (hyperv.py),
+# but a job thread can still hang elsewhere (executor bug, in-guest wait with
+# no deadline). release() used to run only in the job thread's finally, so one
+# permanently hung thread wedged the single-flight slot until an orchestrator
+# restart. The watchdog reaps any job running longer than this wall-clock
+# budget -- generously above the slowest legitimate path (guardian
+# provision/verifier-soak: 1800s script timeout + overhead).
+STALE_JOB_MAX_SECONDS = 3600
+_WATCHDOG_INTERVAL_SECONDS = 60
+_watchdog_started = False
+
 # FIFO queue for analysis jobs only (see module docstring). _queue holds
 # pending job_ids in submission order; _queue_specs holds the kwargs
 # _run_analysis_job needs to actually start each one. Both live only under
@@ -98,6 +110,7 @@ def try_acquire(job_id: str) -> bool:
     across two lock acquisitions would race against release()).
     """
     global _active_job_id
+    _ensure_watchdog()
     with _lock:
         if _active_job_id is not None:
             return False
@@ -105,15 +118,23 @@ def try_acquire(job_id: str) -> bool:
         return True
 
 
-def release() -> None:
+def release(job_id: str) -> None:
     """Free the single-flight slot and, if any analysis jobs are queued,
     atomically hand it straight to the next one — the slot is never
     observably free to a racing caller in between, so try_acquire()'s
-    "_active_job_id is None" check elsewhere stays correct unchanged."""
+    "_active_job_id is None" check elsewhere stays correct unchanged.
+
+    Idempotent per job: it only frees the slot when job_id still owns it.
+    That matters once the stale-job watchdog has reaped a hung job -- when
+    the hung thread eventually returns, its finally-release must NOT free
+    the slot a second time (that would hand it to the next queued job while
+    the legitimate successor is still running)."""
     global _active_job_id
     next_job_id: Optional[str] = None
     next_spec: Optional[Dict[str, Any]] = None
     with _lock:
+        if _active_job_id != job_id:
+            return
         _active_job_id = None
         if _queue:
             next_job_id = _queue.pop(0)
@@ -132,7 +153,7 @@ def release() -> None:
             # A failed hand-off must not wedge the queue forever: drop the
             # slot and mark the job itself failed so the rest can proceed.
             update_job(next_job_id, status="failed", finished_at=_now_iso(), error=f"queue hand-off failed: {exc}")
-            release()
+            release(next_job_id)
 
 
 def get_active_job_id() -> Optional[str]:
@@ -144,6 +165,53 @@ def get_queue_snapshot() -> "tuple[Optional[str], int]":
     """(active_job_id, queue_length) read atomically under one lock."""
     with _lock:
         return _active_job_id, len(_queue)
+
+
+# ---------------------------------------------------------------------------
+# Stale-job watchdog
+# ---------------------------------------------------------------------------
+
+def _ensure_watchdog() -> None:
+    """Start the stale-job watchdog thread exactly once (lazy: keeps test
+    imports side-effect-free until a job is actually submitted)."""
+    global _watchdog_started
+    with _lock:
+        if _watchdog_started:
+            return
+        _watchdog_started = True
+    threading.Thread(target=_watchdog_loop, daemon=True, name="job-slot-watchdog").start()
+
+
+def _watchdog_loop() -> None:
+    while True:
+        time.sleep(_WATCHDOG_INTERVAL_SECONDS)
+        try:
+            _reap_stale_job()
+        except Exception:
+            logger.exception("stale-job watchdog iteration failed")
+
+
+def _reap_stale_job() -> None:
+    """Fail and release any job that has been 'running' longer than
+    STALE_JOB_MAX_SECONDS. Runs outside _lock except for the initial read --
+    release() takes the lock itself."""
+    with _lock:
+        job_id = _active_job_id
+        job = _jobs.get(job_id) if job_id else None
+        if job is None or job["status"] != "running" or not job["started_at"]:
+            return
+        started = datetime.fromisoformat(job["started_at"])
+        age = (datetime.now(timezone.utc) - started).total_seconds()
+        if age <= STALE_JOB_MAX_SECONDS:
+            return
+    logger.error("stale-job watchdog: reaping job %s after %.0fs", job_id, age)
+    update_job(
+        job_id,
+        status="failed",
+        finished_at=_now_iso(),
+        error=f"stale-job watchdog reaped after {int(age)}s (job thread hung)",
+    )
+    release(job_id)
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +348,7 @@ def submit_analysis_job(
     why they're all safe to omit for a plain EXE submission.
     """
     global _active_job_id
+    _ensure_watchdog()
     job_id = str(uuid.uuid4())
     job = _create_job_record(job_id, "analysis", sample_filename, arguments, timeout_seconds, sample_type=sample_type)
 
@@ -386,7 +455,7 @@ def _run_analysis_job(
             error_traceback=tb,
         )
     finally:
-        release()
+        release(job_id)
 
 
 # ---------------------------------------------------------------------------
@@ -475,7 +544,7 @@ def _run_harness_job(
     except Exception as exc:
         update_job(job_id, status="failed", finished_at=_now_iso(), error=str(exc))
     finally:
-        release()
+        release(job_id)
 
 
 # ---------------------------------------------------------------------------
@@ -548,4 +617,4 @@ def _run_guardian_job(job_id: str, action: str) -> None:
     except Exception as exc:
         update_job(job_id, status="failed", finished_at=_now_iso(), error=str(exc))
     finally:
-        release()
+        release(job_id)

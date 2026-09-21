@@ -103,6 +103,19 @@ def test_mptest_during_sample_kept():
     assert len(alerts) == 1 and alerts[0]["in_sample_scope"] is True
 
 
+def test_mptest_pathless_always_dropped():
+    # 2026-09-21 MachineGUID regression: the readiness probe's MpTest detection
+    # landed LATE (after the init log clear) with no Path, and the sample's
+    # stale-stamped ProcessCreate made the time comparison invert -- it scored
+    # +25 on a benign atomic. Path-less MpTest is our probe by construction,
+    # regardless of timestamps.
+    ev = _defender_event("Virus:Win32/MpTest!amsi")
+    ev["data"]["Path"] = None
+    ev["data"]["Detection Time"] = "2026-09-03T18:05:30.000Z"  # AFTER sample start
+    alerts = heuristics.detect_defender_threats([ev], sample_start=datetime(2026, 9, 3, 18, 5, 0))
+    assert alerts == []
+
+
 def test_real_defender_threat_kept():
     alerts = heuristics.detect_defender_threats([_defender_event("Trojan:Win32/Ceprolad.A")])
     assert len(alerts) == 1
@@ -287,6 +300,70 @@ def test_staging_extension_sigma_kept_on_other_path():
                   "title": "Execution of Suspicious File Type Extension"}
     ei = {"Path": "C:\\Sandbox\\9b3f1e32"}
     out = reporting._suppress_monitor_injection_artifacts([a], [], ei)
+    assert out[0]["in_sample_scope"] is True
+
+
+# ---------------------------------------------------------------------------
+# Guardian-marked loader-injection suppression (2026-09-21): after a snapshot
+# revert the guest clock boots at the snapshot's save time, so the earliest
+# ProcessCreate events (the loader's and the sample's own launch) can fall
+# outside the telemetry window -- _tooling_pids() then has nothing to work
+# with and the loader's own injection scores as sample behavior (rg.exe
+# malicious/45). The guardian/apitrace markers (trace root = first
+# __monitor_attached__, GuardianInjectionPlaced targets) identify the same
+# injection without any Sysmon ProcessCreate.
+# ---------------------------------------------------------------------------
+
+_GUARDIAN_MARK_EVENTS = [
+    {"source": "guardian", "event_type": "GuardianInjectionPlaced",
+     "data": {"ProcessId": 0, "TargetProcessId": 10764}},
+    {"source": "guardian", "event_type": "GuardianInjectionPlaced",
+     "data": {"ProcessId": 0, "TargetProcessId": 9180}},
+    {"source": "apitrace", "event_type": "ApiCall",
+     "data": {"Api": "__monitor_attached__", "ProcessId": 10764}},
+    {"source": "apitrace", "event_type": "ApiCall",
+     "data": {"Api": "__monitor_attached__", "ProcessId": 9180}},
+]
+
+
+def test_loader_chain_suppressed_without_proccreate():
+    # rg.exe regression: no ProcessCreate events at all; actor = trace root
+    # (loader), target = guardian-placed pid (the sample child).
+    a = _alert("apitrace", "ApitraceInjectionChain", {
+        "ProcessId": 10764, "TargetProcessId": 9180,
+        "Type": "Write into remote process 9180 followed by thread start/resume"})
+    out = reporting._suppress_monitor_injection_artifacts([a], _GUARDIAN_MARK_EVENTS, None)
+    assert out[0]["in_sample_scope"] is False
+    assert "guardian-marked" in out[0]["scope_reason"]
+
+
+def test_loader_resume_only_suppressed_without_proccreate():
+    # 7za/curl/plink variant: NtResumeThread-only alert carries no start VA,
+    # so the LoadLibrary-VA pass cannot catch it -- the markers must.
+    a = _alert("apitrace", "ApitraceRemoteThread", {
+        "ProcessId": 10764, "TargetProcessId": 9180,
+        "Type": "Remote thread resume via NtResumeThread on process 9180"})
+    out = reporting._suppress_monitor_injection_artifacts([a], _GUARDIAN_MARK_EVENTS, None)
+    assert out[0]["in_sample_scope"] is False
+
+
+def test_sample_injection_kept_when_actor_not_trace_root():
+    # InjectionHarness class: the SAMPLE (a monitored pid, itself placed) is
+    # the actor, not the trace root -> real injection, must keep scoring.
+    a = _alert("apitrace", "ApitraceInjectionChain", {
+        "ProcessId": 9180, "TargetProcessId": 5000,
+        "Type": "Write into remote process 5000 followed by thread start/resume"})
+    out = reporting._suppress_monitor_injection_artifacts([a], _GUARDIAN_MARK_EVENTS, None)
+    assert out[0]["in_sample_scope"] is True
+
+
+def test_loader_action_on_unplaced_target_kept():
+    # Fail-open: trace-root actor but target was never guardian-placed (no
+    # marker proof this is our own injection) -> do not suppress.
+    a = _alert("apitrace", "ApitraceInjectionChain", {
+        "ProcessId": 10764, "TargetProcessId": 4242,
+        "Type": "Write into remote process 4242 followed by thread start/resume"})
+    out = reporting._suppress_monitor_injection_artifacts([a], _GUARDIAN_MARK_EVENTS, None)
     assert out[0]["in_sample_scope"] is True
 
 

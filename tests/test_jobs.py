@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -155,10 +156,51 @@ def test_concurrent_submit_all_complete():
     print(f"PASS: {n} concurrently-submitted jobs all completed, no job left stuck in the queue")
 
 
+def test_stale_release_idempotent_and_watchdog_reap():
+    assert jobs.get_active_job_id() is None, "must start idle"
+    name = "stale.exe"
+    gates[name] = threading.Event()  # stays clear: simulates a hung run_analysis
+    job = jobs.submit_analysis_job(config=None, sample_path=None, sample_filename=name)
+    jid = job["job_id"]
+    assert _wait_until(lambda: name in order), "stale.exe never started"
+
+    # A release from an id that does not own the slot must be a no-op.
+    jobs.release("not-the-owner")
+    assert jobs.get_active_job_id() == jid
+    print("PASS: release() with a non-owner job id does not free the slot")
+
+    # Simulate the job exceeding its wall-clock budget, then reap directly
+    # (the watchdog thread ticks every 60s -- too slow for a unit test).
+    stale_since = (datetime.now(timezone.utc) - timedelta(seconds=jobs.STALE_JOB_MAX_SECONDS + 10)).isoformat()
+    with jobs._lock:
+        jobs._jobs[jid]["started_at"] = stale_since
+    jobs._reap_stale_job()
+    assert jobs.get_active_job_id() is None
+    rec = jobs.get_job(jid)
+    assert rec["status"] == "failed" and "stale-job watchdog" in (rec["error"] or ""), rec
+    print("PASS: watchdog reaps an over-budget running job and frees the slot")
+
+    # Occupy the slot with a successor, THEN let the hung thread return: its
+    # finally-release must not steal the slot from the successor.
+    name2 = "successor.exe"
+    gates[name2] = threading.Event()
+    job2 = jobs.submit_analysis_job(config=None, sample_path=None, sample_filename=name2)
+    jid2 = job2["job_id"]
+    assert _wait_until(lambda: name2 in order), "successor never started"
+    gates[name].set()  # hung stale thread returns now -> finally release(jid)
+    time.sleep(0.2)  # give the stale thread's finally a chance to misbehave
+    assert jobs.get_active_job_id() == jid2, "stale thread's release stole the successor's slot"
+    gates[name2].set()
+    assert _wait_job_finished(jid2), "successor job must still complete normally"
+    assert jobs.get_active_job_id() is None
+    print("PASS: a reaped job's late finally-release does not double-free the slot")
+
+
 def main() -> None:
     test_fifo_order_and_queue_position()
     test_eviction_skips_pending()
     test_concurrent_submit_all_complete()
+    test_stale_release_idempotent_and_watchdog_reap()
     print("ALL JOB-QUEUE TESTS PASSED")
 
 

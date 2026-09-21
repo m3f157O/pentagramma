@@ -16,8 +16,18 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _build_xpath(since_iso: Optional[str] = None) -> str:
-    """Build a wevtutil XPath query. If since_iso is None, fetch last 60 s."""
+def _build_xpath(since_iso: Optional[str] = None, since_record_id: Optional[int] = None) -> str:
+    """Build a wevtutil XPath query. If neither bound is given, fetch last 60 s.
+
+    since_record_id is the CLOCK-IMMUNE bound: the guest resumes from a
+    saved-state snapshot with a stale clock and oscillates (Set-Date vs
+    w32time/Integration Services tug-of-war, confirmed live 2026-09-21), so
+    events generated during a stale phase carry stale TimeCreated and a
+    time-based since-baseline query silently drops them -- the sample's whole
+    process chain vanished from reports this way. EventRecordID is monotonic
+    and unaffected by the wall clock."""
+    if since_record_id is not None:
+        return f"*[System[EventRecordID > {int(since_record_id)}]]"
     if since_iso:
         # wevtutil expects ISO 8601 without timezone offset suffix
         dt = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
@@ -34,9 +44,10 @@ class SysmonParser:
         self,
         since_iso: Optional[str] = None,
         timeout: int = 60,
+        since_record_id: Optional[int] = None,
     ) -> List[Dict]:
         """Query Sysmon events from the event log and return normalized JSON."""
-        xpath = _build_xpath(since_iso)
+        xpath = _build_xpath(since_iso, since_record_id)
         cmd = [
             "wevtutil",
             "qe",
@@ -57,6 +68,26 @@ class SysmonParser:
         xml_data = proc.stdout.strip()
         if not xml_data:
             return []
+
+        return self._parse_wrapped_xml(xml_data)
+
+    def newest_record_id(self, timeout: int = 30) -> Optional[int]:
+        """EventRecordID of the newest event in the log (None when the log is
+        empty/unavailable). Recorded at telemetry-init time as the
+        clock-immune collection baseline (see _build_xpath)."""
+        cmd = ["wevtutil", "qe", self.log_name, "/f:xml", "/c:1", "/rd:true"]
+        try:
+            proc = proc_util.run_text(cmd, timeout=timeout)
+        except Exception:
+            return None
+        if proc.returncode != 0:
+            return None
+        import re
+
+        m = re.search(r"<EventRecordID>(\d+)</EventRecordID>", proc.stdout or "")
+        return int(m.group(1)) if m else None
+
+    def _parse_wrapped_xml(self, xml_data: str) -> List[Dict]:
 
         # wevtutil with /f:xml returns multiple <Event> roots; wrap them.
         if not xml_data.startswith("<?xml"):
